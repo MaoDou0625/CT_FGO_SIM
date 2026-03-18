@@ -3,6 +3,7 @@
 #include "ct_fgo_sim/types.h"
 
 #include <cmath>
+#include <utility>
 
 namespace ct_fgo_sim {
 
@@ -78,10 +79,29 @@ public:
         return {kWgs84Wie * std::cos(lat_rad), 0.0, -kWgs84Wie * std::sin(lat_rad)};
     }
 
+    static Vector3d Wnen(const Vector3d& blh, const Vector3d& v_enu) {
+        const auto [rm, rn] = RmRn(blh.x());
+        const double h = blh.z();
+        return {
+            -v_enu.y() / (rm + h),
+             v_enu.x() / (rn + h),
+             v_enu.x() * std::tan(blh.x()) / (rn + h),
+        };
+    }
+
 private:
     static double Rn(double lat_rad) {
         const double sin_lat = std::sin(lat_rad);
         return kWgs84Ra / std::sqrt(1.0 - kWgs84E1 * sin_lat * sin_lat);
+    }
+
+    static std::pair<double, double> RmRn(double lat_rad) {
+        const double sin_lat = std::sin(lat_rad);
+        const double den = 1.0 - kWgs84E1 * sin_lat * sin_lat;
+        const double sqrt_den = std::sqrt(den);
+        const double rn = kWgs84Ra / sqrt_den;
+        const double rm = kWgs84Ra * (1.0 - kWgs84E1) / (den * sqrt_den);
+        return {rm, rn};
     }
 };
 

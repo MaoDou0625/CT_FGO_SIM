@@ -1,8 +1,8 @@
-gnssfile: "data/GNSS.txt"
-outputpath: "output"
+gnssfile: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_152828_use_short/transformed1cut1/rtk_ct_fgo_sim.txt"
+outputpath: "../output"
 
 imu_main:
-  file: "data/IMU.txt"
+  file: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_152828_use_short/transformed1cut1/imu_ct_fgo_sim.txt"
   columns: 7
   rate_hz: 200.0
   antlever: [0.0, 0.0, 0.0]
@@ -11,3 +11,12 @@ starttime: 0.0
 endtime: 0.0
 aligntime: 30.0
 kf_interval_sec: 0.1
+gnss_sigma_horizontal_m: 0.02
+gnss_sigma_vertical_m: 0.03
+imu_sigma_accel_mps2: 0.2
+imu_sigma_gyro_rps: 0.01
+gyro_bias_rw_sigma: 1.0e-4
+accel_bias_rw_sigma: 1.0e-3
+bias_tau_s: 3600.0
+imu_stride: 10
+solver_max_iterations: 15

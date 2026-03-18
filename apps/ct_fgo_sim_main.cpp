@@ -18,7 +18,5 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    system.Describe();
-    LOG(INFO) << "Next step: wire IMU/GNSS loaders and optimization problem construction.";
-    return 0;
+    return system.Run() ? 0 : 3;
 }

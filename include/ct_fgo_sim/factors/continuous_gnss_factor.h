@@ -18,10 +18,10 @@ struct ContinuousGnssFactor {
         using Vec3T = Eigen::Matrix<T, 3, 1>;
         using ResultT = typename spline::BSplineEvaluator::Result<T>;
 
-        Eigen::Map<const SE3T> t0(p0);
-        Eigen::Map<const SE3T> t1(p1);
-        Eigen::Map<const SE3T> t2(p2);
-        Eigen::Map<const SE3T> t3(p3);
+        const SE3T t0 = Eigen::Map<const SE3T>(p0);
+        const SE3T t1 = Eigen::Map<const SE3T>(p1);
+        const SE3T t2 = Eigen::Map<const SE3T>(p2);
+        const SE3T t3 = Eigen::Map<const SE3T>(p3);
         Eigen::Map<const Vec3T> lever_arm(lever_arm_ptr);
 
         const T u = (T(t_) - T(t0_)) / T(dt_);

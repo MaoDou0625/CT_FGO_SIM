@@ -5,3 +5,5 @@ bin/
 *.suo
 *.vcxproj.user
 *.log
+__pycache__/
+*.pyc

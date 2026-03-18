@@ -1,409 +1,212 @@
 # CT_FGO_SIM
 
-## 目标
+`CT_FGO_SIM` 是从原始 `CT_FGO` 中拆出来的最小连续时间惯导融合实验仓库。当前版本聚焦：
 
-这个项目用于从现有 `CT_FGO` 中整理出一个最小、清晰、可维护的连续时间惯导融合框架，第一阶段只保留：
+- 主 IMU + GNSS/RTK
+- 连续时间样条轨迹
+- 高精度地球模型
+- 最小可运行的批处理与分析工具
 
-- 主 IMU
-- GNSS
+当前目标不是一次性把轮速、NHC、多外参、多传感器全部带上，而是先把主链路做清楚、做稳定。
 
-并明确区分：
+## 当前能力
 
-- 导航主状态
-- IMU 慢变量
-- 时间参数
-- 固定外参
-- 观测因子
+- 读取标准化后的 IMU / RTK 文本数据
+- 构建连续时间样条轨迹
+- 加入 RTK 位置因子、IMU 惯导因子、偏置随机游走因子
+- 用静态段完成粗对准
+- 输出轨迹、偏置、误差图和 RMSE
+- 支持 YuHangTuiChe 数据的批处理
+- 支持按共同位置和按共同轨迹两种方式做高程重复性分析
 
-当前目标不是一次性保留所有轮速、NHC、相位、车轮外参等复杂模块，而是先把最小闭环搭稳。
+## 数据格式
 
-## 建议的最小系统
+### RTK / GNSS
 
-### 输入
+每行格式：
 
-- 主 IMU：时间戳、角增量/角速度、速度增量/比力
-- GNSS：时间戳、位置观测
+```text
+time_s lat_rad lon_rad h_m
+```
 
-### 输出
+### IMU
 
-- 导航系下的姿态、速度、位置
-- IMU 偏置估计
-- 时间偏差估计
-- 固定外参记录
+每行格式：
 
-### 核心能力
+```text
+time_s gyro_x_radps gyro_y_radps gyro_z_radps accel_x_mps2 accel_y_mps2 accel_z_mps2
+```
 
-- 连续时间轨迹样条
-- GNSS 位置因子
-- IMU 惯导因子
-- 偏置随机游走因子
-- 地球自转与重力模型
-
-## 当前 CT_FGO 中值得保留的模块
-
-### 1. 地球模型
-
-建议直接复用现有高精度导航中的：
-
-- 重力模型
-- 地球自转项
-- BLH / ECEF / ENU 转换
-
-原因：
-
-- 这是现有工程里最成熟、最不该重新发明的一部分
-- 对中高精度惯导融合是刚需
-
-### 2. 连续时间样条轨迹
-
-建议保留：
-
-- `ControlPoint`
-- `BSplineEvaluator`
-- `SplineInitializer`
-
-原因：
-
-- 这是 `CT_FGO` 的主体框架
-- IMU 和 GNSS 都已经围绕这套时间连续轨迹在建模
-
-### 3. GNSS 位置因子
-
-建议保留并简化：
-
-- `ContinuousGnssFactor`
-
-第一版只做：
-
-- 位置约束
-- 可配置水平/竖直权重
-
-先不要引入：
-
-- 复杂静止降权逻辑
-- 轮速辅助权重调整
-- 多 GNSS 类型混合
-
-### 4. IMU 惯导因子
-
-建议保留并重新整理接口：
-
-- `ContinuousInertialFactor`
-
-但要把状态定义、坐标系定义、参数意义写清楚，避免现在这种“代码能跑，但概念混合”的情况。
-
-### 5. 偏置因子
-
-建议保留：
-
-- `BiasRandomWalkFactor`
-
-原因：
-
-- `bg/ba` 作为慢变量是惯导系统的基本配置
-- 这部分结构简单、收益明确
-
-## 不建议第一阶段引入的内容
-
-以下内容都应从 `CT_FGO_SIM` 第一阶段排除：
-
-- Wheel IMU
-- Wheel speed factor
-- Wheel NHC factor
-- Wheel gyro / spin / phase 因子
-- 轮半径估计
-- 多种车轮外参估计
-- 与轮速耦合的静止检测
-- 复杂实验脚本和批处理逻辑
-
-原因很简单：
-
-- 它们显著增加状态维数与建模复杂度
-- 会掩盖主 IMU + GNSS 主链路本身的问题
-- 不适合最小系统验证
-
-## 坐标系与状态定义
-
-这是重构时最重要的部分，必须在 README 和代码里保持一致。
-
-### 1. 导航系
-
-建议统一使用本地导航系：
-
-- ENU
-
-轨迹状态输出为：
-
-- 位置 `p_n`
-- 速度 `v_n`
-- 姿态 `R_nb`
-
-其中：
-
-- `R_nb` 表示 body 到 navigation 的旋转
-
-### 2. IMU 系
-
-IMU 原始观测天然定义在 IMU 系：
-
-- 角速度 / 角增量
-- 比力 / 速度增量
-
-主惯导链路应遵循标准逻辑：
-
-- IMU 系测量进入惯导方程
-- 通过当前姿态转换到导航系
-- 在导航系中更新姿态、速度、位置
-
-### 3. 载体系
-
-载体系通常定义为：
-
-- `X` 前
-- `Y` 左
-- `Z` 上
-
-它主要用于：
-
-- 车体约束
-- NHC
-- 轮速模型
-- 结果解释
-
-### 4. 外参
-
-固定外参应被明确区分为：
-
-- `q_body_imu`
-- `l_body_sensor`
-
-其原则是：
-
-- 它们是常值外参
-- 不参与时变导航传播
-- 只进入测量模型
-- 可以优化微调，但必须有先验
-
-## 参数分类
-
-建议在代码和配置文件里把参数分成 4 类。
-
-### A. 导航主状态
-
-时变：
-
-- 样条控制点位姿
-- 从样条导出的速度、角速度、加速度
-
-### B. IMU 慢变量
-
-时变但缓慢：
-
-- 陀螺偏置 `bg`
-- 加计偏置 `ba`
-
-### C. 时间参数
-
-可估但应常值或慢变：
-
-- `td`
-
-解释为：
-
-- `t_sys = t_imu + td`
-
-如果系统以 GNSS 时间为基准，那么 `td` 用于把 IMU 时间对齐到 GNSS 时间轴。
-
-### D. 固定外参
-
-常值：
-
-- `q_body_imu`
-- `l_body_sensor`
-
-## 因子设计建议
-
-### 1. GNSS 因子
-
-第一阶段只保留位置因子。
-
-建议形式：
-
-- 在 `t_gnss` 上评估样条位置
-- 与 GNSS 位置观测做残差
-
-可配置项：
-
-- `sigma_horizontal`
-- `sigma_vertical`
-
-暂时不做：
-
-- 速度 GNSS 因子
-- 多源 GNSS 类型
-- 复杂鲁棒策略
-
-### 2. IMU 惯导因子
-
-这是主系统最关键的因子。
-
-设计原则：
-
-- IMU 测量在 IMU 系中使用
-- 轨迹状态表示导航系中的运动
-- `td` 进入时间对齐
-- `l_body_sensor` 用于杆臂补偿
-
-注意：
-
-- `q_body_imu` 不应被误当成导航状态
-- 它是 IMU 与载体系之间的固定旋转外参
-- 只有在测量模型需要 body/imu 转换时才出现
-
-### 3. 偏置随机游走因子
-
-建议保留现有形式：
-
-- `bg_k -> bg_{k+1}`
-- `ba_k -> ba_{k+1}`
-
-这是维持估计稳定性的基础因子。
-
-### 4. NHC 因子
-
-第一阶段主系统建议默认不启用。
-
-如果后续引入，必须明确：
-
-- NHC 约束的是载体系速度
-- 一般约束载体系 `Y/Z`
-- 不约束 `X`
-
-如果 IMU 与载体系有安装误差，则 NHC 因子必须显式考虑 `q_body_imu`，不能默认 IMU 系和载体系重合。
-
-## 当前 CT_FGO 中暴露出来的设计教训
-
-### 1. 状态定义必须先于代码
-
-现有工程里最大的问题不是因子不够多，而是：
-
-- body
-- imu
-- nav
-- 载体系
-
-这些概念在不同因子里并没有始终保持同一语义。
-
-新项目必须先把这几个系写死，再写代码。
-
-### 2. 固定外参与时变状态不能混
-
-`q_body_imu` 是固定外参，不是导航姿态状态。  
-它可以被估计，但不应该像姿态主状态那样传播。
-
-### 3. 时间偏差必须有清晰基准
-
-`td` 的意义必须始终明确：
-
-- 是 IMU 对系统时间的偏差
-- 还是 GNSS 对系统时间的偏差
-
-建议新项目里统一定义：
-
-- 轨迹时间轴以 GNSS 为准
-- IMU 使用 `t_imu + td`
-
-### 4. 最小系统优先
-
-先把：
-
-- 主 IMU
-- GNSS
-
-做对，再考虑：
-
-- NHC
-- 轮速
-- 轮系外参
-- 多传感器协同
-
-## 建议的新项目目录
+## 项目结构
 
 ```text
 CT_FGO_SIM/
-  README.md
-  CMakeLists.txt
+  apps/
   config/
+  data/
   include/
   src/
-    core/
-    factors/
-    spline/
-    navigation/
-    io/
-  apps/
-  tests/
+  tools/
+  README.md
+  CMakeLists.txt
 ```
 
-建议职责划分：
+## 构建与运行
 
-- `navigation/`
-  地球模型、坐标转换、惯导基础
+### 构建
 
-- `spline/`
-  控制点、样条求值
+```powershell
+cmake -S D:\Code\CT_FGO_SIM -B D:\Code\CT_FGO_SIM\build
+cmake --build D:\Code\CT_FGO_SIM\build --config Release
+```
 
-- `factors/`
-  GNSS 因子、IMU 因子、偏置因子
+### 单组运行
 
-- `core/`
-  问题构建、参数管理、求解流程
+```powershell
+D:\Code\CT_FGO_SIM\build\Release\ct_fgo_sim_main.exe D:\Code\CT_FGO_SIM\config\minimal.yaml
+```
 
-- `io/`
-  IMU / GNSS 数据读取、结果输出
+## 工具脚本
 
-- `apps/`
-  主程序入口
+下面这些 Python 脚本都是工具性脚本，用于数据准备、批处理、绘图和重复性分析。
 
-## 第一阶段实现清单
+### `tools/convert_yuhang_dataset.py`
 
-### 必做
+作用：
 
-- 地球模型与坐标转换
-- 连续时间样条轨迹
-- GNSS 位置因子
-- IMU 惯导因子
-- 偏置随机游走因子
-- 配置系统
-- 基本结果输出
+- 将原始 `YuHangTuiChe` 数据转换成 `CT_FGO_SIM` 直接可读的标准格式
 
-### 暂缓
+输入：
 
-- NHC
-- 轮速
-- 车轮相关全部模块
-- 多 IMU
-- 在线标定复杂逻辑
-- 大规模批处理脚本
+- 原始 `rtk_cut.txt`
+- 原始 `imu_cut.txt`
 
-## 验证建议
+输出：
 
-新项目第一阶段建议只做以下验证：
+- `rtk_ct_fgo_sim.txt`
+- `imu_ct_fgo_sim.txt`
+- `schema.md`
 
-- 单组主 IMU + RTK/GNSS 数据跑通
-- 输出姿态、速度、位置
-- 计算高程 RMSE 和水平 RMSE
-- 检查时间对齐是否合理
-- 检查 `bg/ba/td` 是否收敛到稳定范围
+### `tools/run_yuhang_batch.py`
 
-暂时不要用“更多因子”掩盖主链路问题。
+作用：
 
-## 一句话原则
+- 批量运行 `YuHangTuiChe` 下所有 `transformed1cut*` 分组
+- 自动生成每组配置
+- 自动调用主程序和误差绘图脚本
 
-新项目 `CT_FGO_SIM` 的核心目标不是复制旧工程，而是把旧工程中真正正确、必要、可解释的那部分重新整理出来：
+输出根目录：
 
-- 主 IMU + GNSS
-- 明确坐标系
-- 明确状态定义
-- 明确外参与时间参数
-- 明确每个因子的物理意义
+- `D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_results`
+
+### `tools/plot_outputs.py`
+
+作用：
+
+- 对单组结果生成误差图和对比图
+- 统计 `rmse_e/n/u/h/3d`
+- 识别 IMU 静止到运动的起始时刻，并把时间标到误差图上
+
+输出：
+
+- `horizontal_compare.png`
+- `horizontal_error.png`
+- `height_compare.png`
+- `height_error.png`
+- `enu_error_timeseries.png`
+- `metrics_summary.txt`
+
+用法：
+
+```powershell
+python D:\Code\CT_FGO_SIM\tools\plot_outputs.py --output-dir D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_results\20260122_145751_use\transformed1cut1
+```
+
+### `tools/analyze_yuhang_repeatability.py`
+
+作用：
+
+- 基于所有组结果，寻找“所有组共有的 RTK 位置”
+- 统计这些共同位置上每组的 RTK 高程和导航高程
+- 比较 RTK 与导航的高程重复性
+
+注意：
+
+- 这里的导航高程已经修正为绝对高程，不再直接使用局部 ENU 的 `Up`
+
+输出目录：
+
+- `D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_results\repeatability_analysis`
+
+主要输出：
+
+- `common_position_group_heights.csv`
+- `common_position_repeatability.csv`
+- `repeatability_summary.txt`
+
+### `tools/plot_repeatability_heights.py`
+
+作用：
+
+- 基于共同位置高程统计表，绘制：
+  - 导航高程汇总图
+  - RTK 高程汇总图
+
+输出：
+
+- `navigation_height_summary.png`
+- `rtk_height_summary.png`
+
+### `tools/analyze_yuhang_common_trajectory.py`
+
+作用：
+
+- 针对“同一路段重复跑，但起点终点不完全一致”的场景
+- 先生成一条公共参考轨迹
+- 再根据公共轨迹的共同起终点截取各组数据
+- 按公共里程 `s` 分箱统计 RTK 和导航高程重复性
+
+输出目录：
+
+- `D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_results\common_trajectory_analysis`
+
+主要输出：
+
+- `common_trajectory_summary.txt`
+- `segment_coverage.csv`
+- `reference_common_trajectory.csv`
+- `trimmed_group_heights_by_s.csv`
+- `repeatability_by_s_bin.csv`
+- `navigation_height_vs_common_s.png`
+- `rtk_height_vs_common_s.png`
+- `height_repeatability_std_vs_common_s.png`
+
+## 当前已验证的数据集
+
+- `D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_use`
+
+当前已完成：
+
+- 5 组数据批处理
+- 单组误差分析
+- 共同位置高程重复性分析
+- 公共轨迹截取与按里程高程重复性分析
+
+## 当前结论
+
+按“公共轨迹 + 公共区间 + 1 m 里程分箱”的方案，5 组数据的高程重复性结果为：
+
+- RTK 高程重复性均值标准差约 `0.0119 m`
+- 导航高程重复性均值标准差约 `0.0126 m`
+
+说明当前版本在这批数据上的高程重复性已经接近 RTK。
+
+## 下一步
+
+后续可以在新分支继续做：
+
+- NHC 引入与测试
+- 融合中心线替代单组参考轨迹
+- 更稳健的轨迹投影和公共区间提取
+- 时间偏差 `td` 放开估计
+- 高程异常段鲁棒处理
