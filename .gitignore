@@ -1,0 +1,7 @@
+build/
+out/
+bin/
+*.user
+*.suo
+*.vcxproj.user
+*.log

@@ -1,0 +1,13 @@
+gnssfile: "data/GNSS.txt"
+outputpath: "output"
+
+imu_main:
+  file: "data/IMU.txt"
+  columns: 7
+  rate_hz: 200.0
+  antlever: [0.0, 0.0, 0.0]
+
+starttime: 0.0
+endtime: 0.0
+aligntime: 30.0
+kf_interval_sec: 0.1
