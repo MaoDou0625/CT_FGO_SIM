@@ -1,0 +1,24 @@
+gnss_file: D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_use\20260122_121901_use\transformed1cut1\rtk_ct_fgo_sim.txt
+imu_file: D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_use\20260122_121901_use\transformed1cut1\imu_ct_fgo_sim.txt
+use_gnss_factors: 103
+use_imu_factors: 0
+gnss_count: 561
+imu_count: 112175
+control_point_count: 1127
+outer_iterations: 2
+time_offset_s: 0
+lever_arm_m: 0 0 0
+q_body_imu_xyzw: 0 0 0 1
+initial_q_body_imu_xyzw: 0 0 0 1
+q_body_imu_delta_angle_rad: 0
+nhc_enable_vx: 0
+nhc_enable_vy: 1
+nhc_enable_vz: 1
+estimate_q_body_imu: 1
+origin_blh_rad: 0.53074734998700002 2.094101594928 16.219999999999999
+initial_q_nb_xyzw: 0.0049602230855355922 -0.0071285223118939351 0.98772193168875289 -0.1559806591139721
+alignment_window_start_time_s: 2387.8290000000002
+alignment_window_end_time_s: 2487.8290000000002
+alignment_reference_time_s: 2487.8290000000002
+initial_bg0_rps:  1.7795205687914422e-05 -6.9933499418417536e-06  9.3168497704096957e-05
+initial_ba0_mps2:  1.1790050792298556e-05 -2.4326830909304764e-05   0.0015562447539050339
