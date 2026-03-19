@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import pickle
+import subprocess
+import tempfile
+import textwrap
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -70,6 +73,62 @@ def save_fig_pickle(fig: plt.Figure, path: Path) -> None:
         pickle.dump(fig, f)
 
 
+def require_nonempty(time_s: np.ndarray, label: str, start_time: float | None, end_time: float | None) -> None:
+    if time_s.size == 0:
+        raise RuntimeError(
+            f"{label} has no samples in time window [{start_time}, {end_time}]. "
+            "Check the selected navigation file and requested time range."
+        )
+
+
+def save_matlab_fig(
+    output_fig_path: Path,
+    ct_time: np.ndarray,
+    ct_roll: np.ndarray,
+    ct_pitch: np.ndarray,
+    ct_yaw: np.ndarray,
+    kf_time: np.ndarray,
+    kf_roll: np.ndarray,
+    kf_pitch: np.ndarray,
+    kf_yaw: np.ndarray,
+    ct_label: str,
+    kf_label: str,
+) -> None:
+    output_fig_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="ct_fgo_matlab_fig_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        ct_csv = tmp_dir / "ct_attitude.csv"
+        kf_csv = tmp_dir / "kf_attitude.csv"
+        script_path = tmp_dir / "make_attitude_compare_fig.m"
+        np.savetxt(ct_csv, np.column_stack((ct_time, ct_roll, ct_pitch, ct_yaw)), delimiter=",")
+        np.savetxt(kf_csv, np.column_stack((kf_time, kf_roll, kf_pitch, kf_yaw)), delimiter=",")
+
+        script = textwrap.dedent(
+            f"""
+            ct = readmatrix('{ct_csv.as_posix()}');
+            kf = readmatrix('{kf_csv.as_posix()}');
+            fig = figure('Visible', 'off', 'Position', [100, 100, 1100, 780]);
+            labels = {{'Roll (deg)', 'Pitch (deg)', 'Yaw (deg)'}};
+            for idx = 1:3
+                subplot(3,1,idx);
+                plot(ct(:,1), ct(:,idx+1), 'LineWidth', 1.2, 'DisplayName', '{ct_label}');
+                hold on;
+                plot(kf(:,1), kf(:,idx+1), 'LineWidth', 1.0, 'DisplayName', '{kf_label}');
+                grid on;
+                ylabel(labels{{idx}});
+                legend('Location', 'best');
+            end
+            xlabel('Time (s)');
+            sgtitle('Attitude Comparison');
+            savefig(fig, '{output_fig_path.as_posix()}');
+            close(fig);
+            exit;
+            """
+        ).strip()
+        script_path.write_text(script, encoding="utf-8")
+        subprocess.run(["matlab", "-batch", f"run('{script_path.as_posix()}')"], check=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot CT vs KF attitude comparison.")
     parser.add_argument("--ct-nav", required=True, type=Path, help="Path to trajectory_enu.txt or nominal_nav.txt")
@@ -79,6 +138,7 @@ def main() -> None:
     parser.add_argument("--end-time", type=float, default=None, help="Optional end time in seconds")
     parser.add_argument("--ct-label", default="CT", help="Legend label for CT line")
     parser.add_argument("--kf-label", default="KF-GINS", help="Legend label for KF line")
+    parser.add_argument("--matlab-fig", action="store_true", help="Also export a MATLAB-readable .fig via matlab -batch")
     args = parser.parse_args()
 
     ct_time, ct_roll, ct_pitch, ct_yaw = load_ct_attitude(args.ct_nav)
@@ -88,6 +148,8 @@ def main() -> None:
         ct_time, ct_roll, ct_pitch, ct_yaw, args.start_time, args.end_time)
     kf_time, kf_roll, kf_pitch, kf_yaw = maybe_trim(
         kf_time, kf_roll, kf_pitch, kf_yaw, args.start_time, args.end_time)
+    require_nonempty(ct_time, "CT attitude", args.start_time, args.end_time)
+    require_nonempty(kf_time, "KF attitude", args.start_time, args.end_time)
 
     output_dir = args.output_dir or args.ct_nav.parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -113,7 +175,15 @@ def main() -> None:
     png_path = output_dir / "attitude_compare.png"
     fig_path = output_dir / "attitude_compare.fig"
     fig.savefig(png_path, dpi=180)
-    save_fig_pickle(fig, fig_path)
+    if args.matlab_fig:
+        save_matlab_fig(
+            fig_path,
+            ct_time, ct_roll, ct_pitch, ct_yaw,
+            kf_time, kf_roll, kf_pitch, kf_yaw,
+            args.ct_label, args.kf_label,
+        )
+    else:
+        save_fig_pickle(fig, fig_path)
     plt.close(fig)
 
     print(f"Wrote {png_path}")
