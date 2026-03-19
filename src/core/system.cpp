@@ -195,6 +195,9 @@ bool System::Run() {
     LOG(INFO) << "Origin BLH(rad,rad,m): " << origin_blh_.transpose();
     LOG(INFO) << "Gravity at origin: " << Earth::Gravity(origin_blh_);
     LOG(INFO) << "Earth rotation in nav frame: " << Earth::Iewn(origin_blh_.x()).transpose();
+    LOG(INFO) << "Static alignment window: [" << initial_alignment_.window_start_time
+              << ", " << initial_alignment_.window_end_time << "]";
+    LOG(INFO) << "Static alignment reference time: " << initial_alignment_.reference_time;
 
     if (!BuildAndSolveProblem()) {
         return false;
@@ -537,6 +540,9 @@ bool System::SaveOutputs() const {
                 << initial_q_nb_.y() << ' '
                 << initial_q_nb_.z() << ' '
                 << initial_q_nb_.w() << '\n';
+    summary_ofs << "alignment_window_start_time_s: " << initial_alignment_.window_start_time << '\n';
+    summary_ofs << "alignment_window_end_time_s: " << initial_alignment_.window_end_time << '\n';
+    summary_ofs << "alignment_reference_time_s: " << initial_alignment_.reference_time << '\n';
     summary_ofs << "initial_bg0_rps: " << initial_alignment_.bg0.transpose() << '\n';
     summary_ofs << "initial_ba0_mps2: " << initial_alignment_.ba0.transpose() << '\n';
 

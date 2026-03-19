@@ -7,6 +7,9 @@
 namespace ct_fgo_sim {
 
 struct StaticAlignmentResult {
+    double window_start_time = 0.0;
+    double window_end_time = 0.0;
+    double reference_time = 0.0;
     Quaterniond q_nb = Quaterniond::Identity();
     Vector3d bg0 = Vector3d::Zero();
     Vector3d ba0 = Vector3d::Zero();

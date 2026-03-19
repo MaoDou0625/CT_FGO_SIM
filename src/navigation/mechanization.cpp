@@ -70,16 +70,19 @@ StaticAlignmentResult EstimateInitialAlignment(
         return result;
     }
 
-    const double t_end = imu.front().time + align_time_s;
+    result.window_start_time = imu.front().time;
+    result.window_end_time = imu.front().time + align_time_s;
+    result.reference_time = result.window_end_time;
     Vector3d gyro_mean = Vector3d::Zero();
     Vector3d accel_mean = Vector3d::Zero();
     int count = 0;
     for (const auto& meas : imu) {
-        if (meas.time > t_end) {
+        if (meas.time > result.window_end_time) {
             break;
         }
         gyro_mean += meas.dtheta;
         accel_mean += meas.dvel;
+        result.reference_time = meas.time;
         ++count;
     }
 
@@ -121,10 +124,18 @@ std::vector<NominalNavState> PropagateNominalTrajectory(
     Vector3d blh = initial_blh;
     Vector3d vel_enu = Vector3d::Zero();
     Quaterniond q_nb = alignment.q_nb;
+    size_t anchor_index = 0;
+    while (anchor_index + 1 < imu.size() && imu[anchor_index].time < alignment.reference_time) {
+        ++anchor_index;
+    }
 
-    nav.push_back({imu.front().time, blh, vel_enu, q_nb, alignment.bg0, alignment.ba0});
+    for (size_t i = 0; i <= anchor_index; ++i) {
+        const Vector3d bg = InterpolateBias(imu[i].time, bias_times, gyro_biases, alignment.bg0);
+        const Vector3d ba = InterpolateBias(imu[i].time, bias_times, accel_biases, alignment.ba0);
+        nav.push_back({imu[i].time, blh, vel_enu, q_nb, bg, ba});
+    }
 
-    for (size_t i = 1; i < imu.size(); ++i) {
+    for (size_t i = anchor_index + 1; i < imu.size(); ++i) {
         const auto& meas = imu[i];
         if (meas.dt <= 0.0) {
             continue;
