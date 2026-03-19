@@ -11,6 +11,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+R_NED_TO_ENU = np.array([
+    [0.0, 1.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 0.0, -1.0],
+], dtype=float)
+
+R_FLU_TO_FRD = np.diag([1.0, -1.0, -1.0])
+
+
 def quat_to_euler_enu_xyzw(
     qx: np.ndarray,
     qy: np.ndarray,
@@ -23,6 +32,24 @@ def quat_to_euler_enu_xyzw(
     pitch = np.arcsin(sinp)
     yaw = np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
     return np.degrees(roll), np.degrees(pitch), np.degrees(np.unwrap(yaw))
+
+
+def euler_to_rotmat(roll_rad: float, pitch_rad: float, yaw_rad: float) -> np.ndarray:
+    cr, sr = np.cos(roll_rad), np.sin(roll_rad)
+    cp, sp = np.cos(pitch_rad), np.sin(pitch_rad)
+    cy, sy = np.cos(yaw_rad), np.sin(yaw_rad)
+    return np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr],
+    ], dtype=float)
+
+
+def rotmat_to_euler(rot: np.ndarray) -> tuple[float, float, float]:
+    roll = np.arctan2(rot[2, 1], rot[2, 2])
+    pitch = -np.arcsin(np.clip(rot[2, 0], -1.0, 1.0))
+    yaw = np.arctan2(rot[1, 0], rot[0, 0])
+    return roll, pitch, yaw
 
 
 def load_ct_attitude(nav_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -46,10 +73,19 @@ def load_kf_attitude(nav_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray
         raise RuntimeError(f"Unexpected KF nav shape in {nav_path}")
 
     time_s = data[:, 1]
-    roll_deg = data[:, 8]
-    pitch_deg = data[:, 9]
-    yaw_deg = np.degrees(np.unwrap(np.radians(data[:, 10])))
-    return time_s, roll_deg, pitch_deg, yaw_deg
+    roll_rad = np.radians(data[:, 8])
+    pitch_rad = np.radians(data[:, 9])
+    yaw_rad = np.radians(data[:, 10])
+
+    roll_out = np.empty_like(roll_rad)
+    pitch_out = np.empty_like(pitch_rad)
+    yaw_out = np.empty_like(yaw_rad)
+    for idx in range(len(time_s)):
+        rot_ned_frd = euler_to_rotmat(roll_rad[idx], pitch_rad[idx], yaw_rad[idx])
+        rot_enu_flu = R_NED_TO_ENU @ rot_ned_frd @ R_FLU_TO_FRD
+        roll_out[idx], pitch_out[idx], yaw_out[idx] = rotmat_to_euler(rot_enu_flu)
+
+    return time_s, np.degrees(roll_out), np.degrees(pitch_out), np.degrees(np.unwrap(yaw_out))
 
 
 def maybe_trim(
