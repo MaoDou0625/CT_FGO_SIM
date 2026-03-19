@@ -41,22 +41,6 @@ Eigen::Matrix3d BuildGnssSqrtInfo(double sigma_horizontal_m, double sigma_vertic
     return sqrt_info;
 }
 
-Eigen::Matrix3d BuildTriadFrame(const Vector3d& primary, const Vector3d& secondary) {
-    const Vector3d t1 = primary.normalized();
-    Vector3d t2 = t1.cross(secondary);
-    if (t2.norm() < 1.0e-12) {
-        t2 = t1.unitOrthogonal();
-    } else {
-        t2.normalize();
-    }
-    const Vector3d t3 = t1.cross(t2);
-    Eigen::Matrix3d frame;
-    frame.col(0) = t1;
-    frame.col(1) = t2;
-    frame.col(2) = t3;
-    return frame;
-}
-
 }  // namespace
 
 bool System::LoadConfig(const std::filesystem::path& config_path) {
@@ -271,52 +255,30 @@ bool System::InitializeControlPoints() {
         LOG(ERROR) << "Cannot initialize control points without GNSS";
         return false;
     }
+    if (imu_.empty()) {
+        LOG(ERROR) << "Cannot initialize control points without IMU";
+        return false;
+    }
 
     origin_blh_ = gnss_.front().blh;
-    initial_q_nb_ = EstimateInitialAttitude();
+    initial_alignment_ = EstimateInitialAlignment(imu_, origin_blh_, config_.align_time_s);
+    initial_q_nb_ = initial_alignment_.q_nb;
+    UpdateNominalTrajectoryFromCurrentBiases();
+    if (nominal_nav_.empty()) {
+        LOG(ERROR) << "Nominal mechanization propagation failed";
+        return false;
+    }
+
     std::vector<std::pair<double, Sophus::SE3d>> path;
-    path.reserve(gnss_.size());
-    for (const auto& gnss : gnss_) {
-        const Vector3d local_enu = Earth::GlobalToLocal(origin_blh_, gnss.blh);
-        path.emplace_back(gnss.time, Sophus::SE3d(initial_q_nb_, local_enu));
+    path.reserve(nominal_nav_.size());
+    for (const auto& nav : nominal_nav_) {
+        const Vector3d local_enu = Earth::GlobalToLocal(origin_blh_, nav.blh);
+        path.emplace_back(nav.time, Sophus::SE3d(nav.q_nb, local_enu));
     }
     control_points_ = spline::SplineInitializer::InitializeFromPath(path, config_.spline_dt_s);
     gyro_biases_.assign(control_points_.size(), Vector3d::Zero());
     accel_biases_.assign(control_points_.size(), Vector3d::Zero());
     return !control_points_.empty();
-}
-
-Eigen::Quaterniond System::EstimateInitialAttitude() const {
-    if (imu_.empty()) {
-        return Eigen::Quaterniond::Identity();
-    }
-
-    const double t_end = std::min(config_.end_time, imu_.front().time + config_.align_time_s);
-    Vector3d gyro_mean = Vector3d::Zero();
-    Vector3d accel_mean = Vector3d::Zero();
-    int count = 0;
-    for (const auto& imu_meas : imu_) {
-        if (imu_meas.time > t_end) {
-            break;
-        }
-        gyro_mean += imu_meas.dtheta;
-        accel_mean += imu_meas.dvel;
-        ++count;
-    }
-    if (count < 10 || accel_mean.norm() < 1.0e-6 || gyro_mean.norm() < 1.0e-9) {
-        return Eigen::Quaterniond::Identity();
-    }
-
-    gyro_mean /= static_cast<double>(count);
-    accel_mean /= static_cast<double>(count);
-
-    const Vector3d up_b = accel_mean.normalized();
-    const Vector3d up_n = Vector3d::UnitZ();
-    const Vector3d wie_n = Earth::Iewn(origin_blh_.x());
-    const Eigen::Matrix3d triad_b = BuildTriadFrame(up_b, gyro_mean.normalized());
-    const Eigen::Matrix3d triad_n = BuildTriadFrame(up_n, wie_n.normalized());
-    const Eigen::Matrix3d r_nb = triad_n * triad_b.transpose();
-    return Eigen::Quaterniond(r_nb);
 }
 
 bool System::BuildAndSolveProblem() {
@@ -479,7 +441,24 @@ bool System::BuildAndSolveProblem() {
     LOG(INFO) << "Bias RW factors: " << bias_factor_count;
     LOG(INFO) << "Body NHC factors: " << nhc_factor_count;
     LOG(INFO) << summary.BriefReport();
+    UpdateNominalTrajectoryFromCurrentBiases();
     return summary.termination_type != ceres::FAILURE;
+}
+
+void System::UpdateNominalTrajectoryFromCurrentBiases() {
+    std::vector<double> bias_times;
+    bias_times.reserve(control_points_.size());
+    for (const auto& control_point : control_points_) {
+        bias_times.push_back(control_point.Timestamp());
+    }
+
+    nominal_nav_ = PropagateNominalTrajectory(
+        imu_,
+        origin_blh_,
+        initial_alignment_,
+        bias_times,
+        gyro_biases_,
+        accel_biases_);
 }
 
 bool System::SaveOutputs() const {
@@ -558,9 +537,35 @@ bool System::SaveOutputs() const {
                 << initial_q_nb_.y() << ' '
                 << initial_q_nb_.z() << ' '
                 << initial_q_nb_.w() << '\n';
+    summary_ofs << "initial_bg0_rps: " << initial_alignment_.bg0.transpose() << '\n';
+    summary_ofs << "initial_ba0_mps2: " << initial_alignment_.ba0.transpose() << '\n';
+
+    const std::filesystem::path nominal_path = config_.output_path / "nominal_nav.txt";
+    std::ofstream nominal_ofs(nominal_path);
+    nominal_ofs << "# time_s lat_rad lon_rad h_m ve_mps vn_mps vu_mps qx qy qz qw bgx bgy bgz bax bay baz\n";
+    for (const auto& nav : nominal_nav_) {
+        nominal_ofs << std::setprecision(17)
+                    << nav.time << ' '
+                    << nav.blh.x() << ' '
+                    << nav.blh.y() << ' '
+                    << nav.blh.z() << ' '
+                    << nav.vel_enu.x() << ' '
+                    << nav.vel_enu.y() << ' '
+                    << nav.vel_enu.z() << ' '
+                    << nav.q_nb.x() << ' '
+                    << nav.q_nb.y() << ' '
+                    << nav.q_nb.z() << ' '
+                    << nav.q_nb.w() << ' '
+                    << nav.bg.x() << ' '
+                    << nav.bg.y() << ' '
+                    << nav.bg.z() << ' '
+                    << nav.ba.x() << ' '
+                    << nav.ba.y() << ' '
+                    << nav.ba.z() << '\n';
+    }
 
     LOG(INFO) << "Wrote outputs to " << config_.output_path.string();
-    return trajectory_ofs.good() && bias_ofs.good() && summary_ofs.good();
+    return trajectory_ofs.good() && bias_ofs.good() && summary_ofs.good() && nominal_ofs.good();
 }
 
 }  // namespace ct_fgo_sim

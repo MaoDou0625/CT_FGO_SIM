@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ct_fgo_sim/navigation/mechanization.h"
 #include "ct_fgo_sim/navigation/earth.h"
 #include "ct_fgo_sim/spline/spline_initializer.h"
 #include "ct_fgo_sim/spline/control_point.h"
@@ -65,10 +66,10 @@ public:
 private:
     bool LoadMeasurements();
     void TrimMeasurementsToTimeWindow();
-    Eigen::Quaterniond EstimateInitialAttitude() const;
     bool InitializeControlPoints();
     bool BuildAndSolveProblem();
     bool SaveOutputs() const;
+    void UpdateNominalTrajectoryFromCurrentBiases();
 
     AppConfig config_;
     std::vector<GnssMeasurement> gnss_;
@@ -82,6 +83,8 @@ private:
     double time_offset_s_ = 0.0;
     Vector3d origin_blh_ = Vector3d::Zero();
     Eigen::Quaterniond initial_q_nb_ = Eigen::Quaterniond::Identity();
+    StaticAlignmentResult initial_alignment_;
+    std::vector<NominalNavState> nominal_nav_;
 };
 
 }  // namespace ct_fgo_sim

@@ -36,6 +36,7 @@ find_package(glog REQUIRED)
 
 add_library(ct_fgo_sim
     src/core/system.cpp
+    src/navigation/mechanization.cpp
 )
 
 target_include_directories(ct_fgo_sim
