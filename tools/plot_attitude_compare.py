@@ -98,6 +98,26 @@ def maybe_trim(
     return time_s[mask], roll_deg[mask], pitch_deg[mask], yaw_deg[mask]
 
 
+def compute_common_time_window(
+    ct_time: np.ndarray,
+    kf_time: np.ndarray,
+    start_time: float | None,
+    end_time: float | None,
+) -> tuple[float, float]:
+    common_start = max(ct_time[0], kf_time[0])
+    common_end = min(ct_time[-1], kf_time[-1])
+    if start_time is not None:
+        common_start = max(common_start, start_time)
+    if end_time is not None:
+        common_end = min(common_end, end_time)
+    if common_start > common_end:
+        raise RuntimeError(
+            f"No common time window between CT and KF after trimming: "
+            f"[{common_start}, {common_end}]"
+        )
+    return common_start, common_end
+
+
 def save_fig_pickle(fig: plt.Figure, path: Path) -> None:
     with path.open("wb") as f:
         pickle.dump(fig, f)
@@ -221,12 +241,15 @@ def main() -> None:
     ct_time, ct_roll, ct_pitch, ct_yaw = load_ct_attitude(args.ct_nav)
     kf_time, kf_roll, kf_pitch, kf_yaw = load_kf_attitude(args.kf_nav)
 
+    common_start, common_end = compute_common_time_window(
+        ct_time, kf_time, args.start_time, args.end_time)
+
     ct_time, ct_roll, ct_pitch, ct_yaw = maybe_trim(
-        ct_time, ct_roll, ct_pitch, ct_yaw, args.start_time, args.end_time)
+        ct_time, ct_roll, ct_pitch, ct_yaw, common_start, common_end)
     kf_time, kf_roll, kf_pitch, kf_yaw = maybe_trim(
-        kf_time, kf_roll, kf_pitch, kf_yaw, args.start_time, args.end_time)
-    require_nonempty(ct_time, "CT attitude", args.start_time, args.end_time)
-    require_nonempty(kf_time, "KF attitude", args.start_time, args.end_time)
+        kf_time, kf_roll, kf_pitch, kf_yaw, common_start, common_end)
+    require_nonempty(ct_time, "CT attitude", common_start, common_end)
+    require_nonempty(kf_time, "KF attitude", common_start, common_end)
 
     output_dir = args.output_dir or args.ct_nav.parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -252,9 +275,14 @@ def main() -> None:
 
     if full_nav_path is not None:
         full_time, full_roll, full_pitch, full_yaw = load_ct_attitude(full_nav_path)
+        full_common_start, full_common_end = compute_common_time_window(
+            full_time, kf_time, args.start_time, args.end_time)
         full_time, full_roll, full_pitch, full_yaw = maybe_trim(
-            full_time, full_roll, full_pitch, full_yaw, args.start_time, args.end_time)
-        require_nonempty(full_time, "CT full attitude", args.start_time, args.end_time)
+            full_time, full_roll, full_pitch, full_yaw, full_common_start, full_common_end)
+        full_kf_time, full_kf_roll, full_kf_pitch, full_kf_yaw = maybe_trim(
+            kf_time, kf_roll, kf_pitch, kf_yaw, full_common_start, full_common_end)
+        require_nonempty(full_time, "CT full attitude", full_common_start, full_common_end)
+        require_nonempty(full_kf_time, "KF attitude", full_common_start, full_common_end)
 
         full_png_path = output_dir / "attitude_compare_full.png"
         full_fig_path = output_dir / "attitude_compare_full.fig"
@@ -263,7 +291,7 @@ def main() -> None:
             full_fig_path,
             "Attitude Comparison (Full vs KF)",
             full_time, full_roll, full_pitch, full_yaw,
-            kf_time, kf_roll, kf_pitch, kf_yaw,
+            full_kf_time, full_kf_roll, full_kf_pitch, full_kf_yaw,
             "CT full", args.kf_label, args.matlab_fig,
         )
         print(f"Wrote {full_png_path}")
