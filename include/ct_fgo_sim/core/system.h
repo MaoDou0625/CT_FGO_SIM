@@ -84,7 +84,7 @@ private:
     Vector3d origin_blh_ = Vector3d::Zero();
     Eigen::Quaterniond initial_q_nb_ = Eigen::Quaterniond::Identity();
     StaticAlignmentResult initial_alignment_;
-    std::vector<NominalNavState> nominal_nav_;
+    NominalNavStates nominal_nav_;
 };
 
 }  // namespace ct_fgo_sim

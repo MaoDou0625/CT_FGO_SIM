@@ -108,14 +108,14 @@ StaticAlignmentResult EstimateInitialAlignment(
     return result;
 }
 
-std::vector<NominalNavState> PropagateNominalTrajectory(
+NominalNavStates PropagateNominalTrajectory(
     const std::vector<ImuMeasurement>& imu,
     const Vector3d& initial_blh,
     const StaticAlignmentResult& alignment,
     const std::vector<double>& bias_times,
     const std::vector<Vector3d>& gyro_biases,
     const std::vector<Vector3d>& accel_biases) {
-    std::vector<NominalNavState> nav;
+    NominalNavStates nav;
     if (imu.empty()) {
         return nav;
     }

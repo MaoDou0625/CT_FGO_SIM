@@ -7,6 +7,7 @@
 namespace ct_fgo_sim {
 
 struct StaticAlignmentResult {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     double window_start_time = 0.0;
     double window_end_time = 0.0;
     double reference_time = 0.0;
@@ -16,6 +17,7 @@ struct StaticAlignmentResult {
 };
 
 struct NominalNavState {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     double time = 0.0;
     Vector3d blh = Vector3d::Zero();
     Vector3d vel_enu = Vector3d::Zero();
@@ -24,12 +26,14 @@ struct NominalNavState {
     Vector3d ba = Vector3d::Zero();
 };
 
+using NominalNavStates = std::vector<NominalNavState, Eigen::aligned_allocator<NominalNavState>>;
+
 StaticAlignmentResult EstimateInitialAlignment(
     const std::vector<ImuMeasurement>& imu,
     const Vector3d& origin_blh,
     double align_time_s);
 
-std::vector<NominalNavState> PropagateNominalTrajectory(
+NominalNavStates PropagateNominalTrajectory(
     const std::vector<ImuMeasurement>& imu,
     const Vector3d& initial_blh,
     const StaticAlignmentResult& alignment,

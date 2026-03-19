@@ -184,6 +184,21 @@ bool System::Run() {
         return false;
     }
     TrimMeasurementsToTimeWindow();
+    if (gnss_.empty() || imu_.empty()) {
+        LOG(ERROR) << "No measurements remain after initial time-window trimming";
+        return false;
+    }
+
+    origin_blh_ = gnss_.front().blh;
+    initial_alignment_ = EstimateInitialAlignment(imu_, origin_blh_, config_.align_time_s);
+    initial_q_nb_ = initial_alignment_.q_nb;
+    config_.start_time = std::max(config_.start_time, initial_alignment_.reference_time);
+    TrimMeasurementsToTimeWindow();
+    if (gnss_.empty() || imu_.empty()) {
+        LOG(ERROR) << "No measurements remain after applying alignment reference time";
+        return false;
+    }
+
     if (!InitializeControlPoints()) {
         return false;
     }
@@ -263,9 +278,6 @@ bool System::InitializeControlPoints() {
         return false;
     }
 
-    origin_blh_ = gnss_.front().blh;
-    initial_alignment_ = EstimateInitialAlignment(imu_, origin_blh_, config_.align_time_s);
-    initial_q_nb_ = initial_alignment_.q_nb;
     UpdateNominalTrajectoryFromCurrentBiases();
     if (nominal_nav_.empty()) {
         LOG(ERROR) << "Nominal mechanization propagation failed";
