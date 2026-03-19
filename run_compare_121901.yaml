@@ -1,0 +1,38 @@
+gnssfile: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_121901_use/transformed1cut1/rtk_ct_fgo_sim.txt"
+outputpath: "D:/Code/CT_FGO_SIM/output"
+
+imu_main:
+  file: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_121901_use/transformed1cut1/imu_ct_fgo_sim.txt"
+  columns: 7
+  rate_hz: 200.0
+  antlever: [0.0, 0.0, 0.0]
+
+body_frame:
+  q_body_imu_xyzw: [0.0, 0.0, 0.0, 1.0]
+  q_body_imu_prior_sigma_rad: 0.1
+  enable_nhc: false
+  estimate_q_body_imu: true
+  nhc_enable_vx: false
+  nhc_enable_vy: true
+  nhc_enable_vz: true
+  nhc_target_vx_mps: 0.0
+  nhc_target_vy_mps: 0.0
+  nhc_target_vz_mps: 0.0
+  nhc_sigma_vx_mps: 1000000.0
+  nhc_sigma_vy_mps: 0.2
+  nhc_sigma_vz_mps: 0.2
+
+starttime: 0.0
+endtime: 2600.0
+aligntime: 100.0
+kf_interval_sec: 0.1
+gnss_sigma_horizontal_m: 0.02
+gnss_sigma_vertical_m: 0.03
+imu_sigma_accel_mps2: 0.2
+imu_sigma_gyro_rps: 0.01
+gyro_bias_rw_sigma: 1.0e-4
+accel_bias_rw_sigma: 1.0e-3
+bias_tau_s: 3600.0
+imu_stride: 10
+outer_iterations: 2
+solver_max_iterations: 15
