@@ -159,10 +159,57 @@ def save_matlab_fig(
         subprocess.run(["matlab", "-batch", f"run('{script_path.as_posix()}')"], check=True)
 
 
+def plot_and_save(
+    output_png_path: Path,
+    output_fig_path: Path,
+    title: str,
+    ct_time: np.ndarray,
+    ct_roll: np.ndarray,
+    ct_pitch: np.ndarray,
+    ct_yaw: np.ndarray,
+    kf_time: np.ndarray,
+    kf_roll: np.ndarray,
+    kf_pitch: np.ndarray,
+    kf_yaw: np.ndarray,
+    ct_label: str,
+    kf_label: str,
+    matlab_fig: bool,
+) -> None:
+    fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+    series = [
+        ("Roll (deg)", ct_roll, kf_roll),
+        ("Pitch (deg)", ct_pitch, kf_pitch),
+        ("Yaw (deg)", ct_yaw, kf_yaw),
+    ]
+
+    for ax, (ylabel, ct_values, kf_values) in zip(axes, series):
+        ax.plot(ct_time, ct_values, linewidth=1.2, label=ct_label)
+        ax.plot(kf_time, kf_values, linewidth=1.0, label=kf_label)
+        ax.set_ylabel(ylabel)
+        ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+        ax.legend(loc="best")
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(output_png_path, dpi=180)
+    if matlab_fig:
+        save_matlab_fig(
+            output_fig_path,
+            ct_time, ct_roll, ct_pitch, ct_yaw,
+            kf_time, kf_roll, kf_pitch, kf_yaw,
+            ct_label, kf_label,
+        )
+    else:
+        save_fig_pickle(fig, output_fig_path)
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot CT vs KF attitude comparison.")
     parser.add_argument("--ct-nav", required=True, type=Path, help="Path to trajectory_enu.txt or nominal_nav.txt")
     parser.add_argument("--kf-nav", required=True, type=Path, help="Path to KF_GINS_Navresult.nav")
+    parser.add_argument("--full-nav", type=Path, default=None, help="Optional path to trajectory_enu.txt for full-state plot")
     parser.add_argument("--output-dir", type=Path, default=None, help="Output directory; defaults to CT nav parent")
     parser.add_argument("--start-time", type=float, default=None, help="Optional start time in seconds")
     parser.add_argument("--end-time", type=float, default=None, help="Optional end time in seconds")
@@ -184,40 +231,43 @@ def main() -> None:
     output_dir = args.output_dir or args.ct_nav.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
-    series = [
-        ("Roll (deg)", ct_roll, kf_roll),
-        ("Pitch (deg)", ct_pitch, kf_pitch),
-        ("Yaw (deg)", ct_yaw, kf_yaw),
-    ]
+    nominal_png_path = output_dir / "attitude_compare.png"
+    nominal_fig_path = output_dir / "attitude_compare.fig"
+    plot_and_save(
+        nominal_png_path,
+        nominal_fig_path,
+        "Attitude Comparison (Nominal vs KF)",
+        ct_time, ct_roll, ct_pitch, ct_yaw,
+        kf_time, kf_roll, kf_pitch, kf_yaw,
+        args.ct_label, args.kf_label, args.matlab_fig,
+    )
+    print(f"Wrote {nominal_png_path}")
+    print(f"Wrote {nominal_fig_path}")
 
-    for ax, (ylabel, ct_values, kf_values) in zip(axes, series):
-        ax.plot(ct_time, ct_values, linewidth=1.2, label=args.ct_label)
-        ax.plot(kf_time, kf_values, linewidth=1.0, label=args.kf_label)
-        ax.set_ylabel(ylabel)
-        ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
-        ax.legend(loc="best")
+    full_nav_path = args.full_nav
+    if full_nav_path is None:
+        sibling_full = args.ct_nav.parent / "trajectory_enu.txt"
+        if sibling_full != args.ct_nav and sibling_full.exists():
+            full_nav_path = sibling_full
 
-    axes[-1].set_xlabel("Time (s)")
-    fig.suptitle("Attitude Comparison")
-    fig.tight_layout()
+    if full_nav_path is not None:
+        full_time, full_roll, full_pitch, full_yaw = load_ct_attitude(full_nav_path)
+        full_time, full_roll, full_pitch, full_yaw = maybe_trim(
+            full_time, full_roll, full_pitch, full_yaw, args.start_time, args.end_time)
+        require_nonempty(full_time, "CT full attitude", args.start_time, args.end_time)
 
-    png_path = output_dir / "attitude_compare.png"
-    fig_path = output_dir / "attitude_compare.fig"
-    fig.savefig(png_path, dpi=180)
-    if args.matlab_fig:
-        save_matlab_fig(
-            fig_path,
-            ct_time, ct_roll, ct_pitch, ct_yaw,
+        full_png_path = output_dir / "attitude_compare_full.png"
+        full_fig_path = output_dir / "attitude_compare_full.fig"
+        plot_and_save(
+            full_png_path,
+            full_fig_path,
+            "Attitude Comparison (Full vs KF)",
+            full_time, full_roll, full_pitch, full_yaw,
             kf_time, kf_roll, kf_pitch, kf_yaw,
-            args.ct_label, args.kf_label,
+            "CT full", args.kf_label, args.matlab_fig,
         )
-    else:
-        save_fig_pickle(fig, fig_path)
-    plt.close(fig)
-
-    print(f"Wrote {png_path}")
-    print(f"Wrote {fig_path}")
+        print(f"Wrote {full_png_path}")
+        print(f"Wrote {full_fig_path}")
 
 
 if __name__ == "__main__":
