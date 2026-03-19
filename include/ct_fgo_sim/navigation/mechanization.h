@@ -2,6 +2,7 @@
 
 #include "ct_fgo_sim/types.h"
 
+#include <optional>
 #include <vector>
 
 namespace ct_fgo_sim {
@@ -40,5 +41,9 @@ NominalNavStates PropagateNominalTrajectory(
     const std::vector<double>& bias_times,
     const std::vector<Vector3d>& gyro_biases,
     const std::vector<Vector3d>& accel_biases);
+
+std::optional<NominalNavState> EvaluateNominalState(
+    const NominalNavStates& states,
+    double time);
 
 }  // namespace ct_fgo_sim

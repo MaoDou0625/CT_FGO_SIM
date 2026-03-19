@@ -59,6 +59,19 @@ Vector3d InterpolateBias(
     return biases[i] * (1.0 - u) + biases[j] * u;
 }
 
+Quaterniond InterpolateQuaternion(
+    double time,
+    const NominalNavStates& states,
+    size_t i,
+    size_t j) {
+    const double dt = states[j].time - states[i].time;
+    if (dt <= 1.0e-9) {
+        return states[i].q_nb;
+    }
+    const double u = std::clamp((time - states[i].time) / dt, 0.0, 1.0);
+    return states[i].q_nb.slerp(u, states[j].q_nb).normalized();
+}
+
 }  // namespace
 
 StaticAlignmentResult EstimateInitialAlignment(
@@ -167,6 +180,54 @@ NominalNavStates PropagateNominalTrajectory(
     }
 
     return nav;
+}
+
+std::optional<NominalNavState> EvaluateNominalState(
+    const NominalNavStates& states,
+    double time) {
+    if (states.empty()) {
+        return std::nullopt;
+    }
+    if (states.size() == 1 || time <= states.front().time) {
+        NominalNavState out = states.front();
+        out.time = time;
+        return out;
+    }
+    if (time >= states.back().time) {
+        NominalNavState out = states.back();
+        out.time = time;
+        return out;
+    }
+
+    const auto upper = std::lower_bound(
+        states.begin(),
+        states.end(),
+        time,
+        [](const NominalNavState& state, double t) { return state.time < t; });
+    if (upper == states.begin()) {
+        NominalNavState out = states.front();
+        out.time = time;
+        return out;
+    }
+
+    const size_t j = static_cast<size_t>(std::distance(states.begin(), upper));
+    const size_t i = j - 1;
+    const double dt = states[j].time - states[i].time;
+    if (dt <= 1.0e-9) {
+        NominalNavState out = states[i];
+        out.time = time;
+        return out;
+    }
+
+    const double u = std::clamp((time - states[i].time) / dt, 0.0, 1.0);
+    NominalNavState out;
+    out.time = time;
+    out.blh = states[i].blh * (1.0 - u) + states[j].blh * u;
+    out.vel_enu = states[i].vel_enu * (1.0 - u) + states[j].vel_enu * u;
+    out.q_nb = InterpolateQuaternion(time, states, i, j);
+    out.bg = states[i].bg * (1.0 - u) + states[j].bg * u;
+    out.ba = states[i].ba * (1.0 - u) + states[j].ba * u;
+    return out;
 }
 
 }  // namespace ct_fgo_sim

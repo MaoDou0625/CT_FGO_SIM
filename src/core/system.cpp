@@ -2,6 +2,7 @@
 
 #include "ct_fgo_sim/factors/bias_random_walk_factor.h"
 #include "ct_fgo_sim/factors/body_velocity_constraint_factor.h"
+#include "ct_fgo_sim/factors/continuous_attitude_factor.h"
 #include "ct_fgo_sim/factors/continuous_gnss_factor.h"
 #include "ct_fgo_sim/factors/continuous_inertial_factor.h"
 #include "ct_fgo_sim/factors/quaternion_prior_factor.h"
@@ -39,6 +40,35 @@ Eigen::Matrix3d BuildGnssSqrtInfo(double sigma_horizontal_m, double sigma_vertic
     sqrt_info(1, 1) = 1.0 / std::max(1.0e-6, sigma_horizontal_m);
     sqrt_info(2, 2) = 1.0 / std::max(1.0e-6, sigma_vertical_m);
     return sqrt_info;
+}
+
+Vector3d InterpolateNodeValue(
+    double time,
+    const std::vector<spline::ControlPoint>& control_points,
+    const std::vector<Vector3d>& nodes) {
+    if (control_points.empty() || nodes.empty() || control_points.size() != nodes.size()) {
+        return Vector3d::Zero();
+    }
+    if (time <= control_points.front().Timestamp()) {
+        return nodes.front();
+    }
+    if (time >= control_points.back().Timestamp()) {
+        return nodes.back();
+    }
+
+    const auto upper = std::lower_bound(
+        control_points.begin(),
+        control_points.end(),
+        time,
+        [](const spline::ControlPoint& control_point, double t) { return control_point.Timestamp() < t; });
+    const size_t j = static_cast<size_t>(std::distance(control_points.begin(), upper));
+    const size_t i = j - 1;
+    const double dt = control_points[j].Timestamp() - control_points[i].Timestamp();
+    if (dt <= 1.0e-9) {
+        return nodes[i];
+    }
+    const double u = std::clamp((time - control_points[i].Timestamp()) / dt, 0.0, 1.0);
+    return nodes[i] * (1.0 - u) + nodes[j] * u;
 }
 
 }  // namespace
@@ -411,15 +441,37 @@ bool System::BuildAndSolveProblem() {
             if (start < 0 || start + 2 >= static_cast<int>(gyro_biases_.size())) {
                 continue;
             }
-            ceres::CostFunction* cost = factors::ContinuousInertialFactor::Create(
+            const auto nominal0 = EvaluateNominalState(nominal_nav_, control_points_[start + 0].Timestamp());
+            const auto nominal1 = EvaluateNominalState(nominal_nav_, control_points_[start + 1].Timestamp());
+            const auto nominal2 = EvaluateNominalState(nominal_nav_, control_points_[start + 2].Timestamp());
+            const auto nominal3 = EvaluateNominalState(nominal_nav_, control_points_[start + 3].Timestamp());
+            const auto nominal_gyro_center = EvaluateNominalGyroCenterAtTime(imu_meas.time);
+            if (!nominal0 || !nominal1 || !nominal2 || !nominal3 || !nominal_gyro_center) {
+                continue;
+            }
+            const Sophus::SE3d nominal_pose0(
+                nominal0->q_nb,
+                Earth::GlobalToLocal(origin_blh_, nominal0->blh));
+            const Sophus::SE3d nominal_pose1(
+                nominal1->q_nb,
+                Earth::GlobalToLocal(origin_blh_, nominal1->blh));
+            const Sophus::SE3d nominal_pose2(
+                nominal2->q_nb,
+                Earth::GlobalToLocal(origin_blh_, nominal2->blh));
+            const Sophus::SE3d nominal_pose3(
+                nominal3->q_nb,
+                Earth::GlobalToLocal(origin_blh_, nominal3->blh));
+            ceres::CostFunction* cost = factors::ContinuousAttitudeFactor::Create(
                 imu_meas.time,
-                imu_meas.dvel,
                 imu_meas.dtheta,
-                origin_blh_,
                 config_.spline_dt_s,
                 control_points_[start].Timestamp(),
-                config_.imu_sigma_accel_mps2,
-                config_.imu_sigma_gyro_rps);
+                config_.imu_sigma_gyro_rps,
+                nominal_pose0,
+                nominal_pose1,
+                nominal_pose2,
+                nominal_pose3,
+                *nominal_gyro_center);
             problem.AddResidualBlock(
                 cost,
                 new ceres::HuberLoss(1.0),
@@ -429,9 +481,6 @@ bool System::BuildAndSolveProblem() {
                 control_points_[start + 3].PoseData(),
                 gyro_biases_[start + 1].data(),
                 gyro_biases_[start + 2].data(),
-                accel_biases_[start + 1].data(),
-                accel_biases_[start + 2].data(),
-                lever_arm_.data(),
                 &time_offset_s_);
             ++inertial_factor_count;
 
@@ -502,6 +551,109 @@ bool System::BuildAndSolveProblem() {
     return summary.termination_type != ceres::FAILURE;
 }
 
+std::optional<spline::BSplineEvaluator::Result<double>> System::EvaluateSplineState(double time) const {
+    const int start = FindSplineWindowStart(control_points_, config_.spline_dt_s, time);
+    if (start < 0) {
+        return std::nullopt;
+    }
+
+    const double u = (time - control_points_[start].Timestamp()) / config_.spline_dt_s;
+    return spline::BSplineEvaluator::Evaluate(
+        u,
+        config_.spline_dt_s,
+        control_points_[start + 0].Pose(),
+        control_points_[start + 1].Pose(),
+        control_points_[start + 2].Pose(),
+        control_points_[start + 3].Pose());
+}
+
+std::optional<Vector3d> System::EvaluateBiasAtTime(
+    double time,
+    const std::vector<Vector3d>& bias_nodes) const {
+    if (control_points_.empty() || bias_nodes.empty() || control_points_.size() != bias_nodes.size()) {
+        return std::nullopt;
+    }
+    return InterpolateNodeValue(time, control_points_, bias_nodes);
+}
+
+std::optional<Vector3d> System::EvaluateNominalGyroCenterAtTime(double time) const {
+    if (nominal_nav_.size() < 2) {
+        return std::nullopt;
+    }
+
+    const auto upper = std::lower_bound(
+        nominal_nav_.begin(),
+        nominal_nav_.end(),
+        time,
+        [](const NominalNavState& state, double t) { return state.time < t; });
+    size_t i = 0;
+    size_t j = 1;
+    if (upper == nominal_nav_.begin()) {
+        i = 0;
+        j = 1;
+    } else if (upper == nominal_nav_.end()) {
+        i = nominal_nav_.size() - 2;
+        j = nominal_nav_.size() - 1;
+    } else {
+        j = static_cast<size_t>(std::distance(nominal_nav_.begin(), upper));
+        i = j - 1;
+    }
+
+    const double dt = nominal_nav_[j].time - nominal_nav_[i].time;
+    if (dt <= 1.0e-9) {
+        return std::nullopt;
+    }
+
+    const Eigen::Quaterniond q_i = nominal_nav_[i].q_nb;
+    const Eigen::Quaterniond q_j = nominal_nav_[j].q_nb;
+    const Eigen::Quaterniond q_delta = (q_i.conjugate() * q_j).normalized();
+    const Eigen::AngleAxisd aa(q_delta);
+    Vector3d rotvec_body = Vector3d::Zero();
+    if (std::abs(aa.angle()) > 1.0e-12) {
+        rotvec_body = aa.axis() * aa.angle();
+    }
+    const Vector3d nominal_w_body = rotvec_body / dt;
+
+    const auto nominal_state = EvaluateNominalState(nominal_nav_, time);
+    if (!nominal_state) {
+        return std::nullopt;
+    }
+
+    const Vector3d omega_ie_n = Earth::Iewn(nominal_state->blh.x());
+    const Vector3d omega_en_n = Earth::Wnen(nominal_state->blh, nominal_state->vel_enu);
+    const Vector3d omega_in_b = nominal_state->q_nb.toRotationMatrix().transpose() * (omega_ie_n + omega_en_n);
+    return nominal_w_body + omega_in_b;
+}
+
+std::optional<ComposedState> System::EvaluateComposedState(double time) const {
+    const auto nominal_state = EvaluateNominalState(nominal_nav_, time);
+    const auto spline_state = EvaluateSplineState(time);
+    const auto bg_state = EvaluateBiasAtTime(time, gyro_biases_);
+    const auto ba_state = EvaluateBiasAtTime(time, accel_biases_);
+    if (!nominal_state || !spline_state || !bg_state || !ba_state) {
+        return std::nullopt;
+    }
+
+    ComposedState composed;
+    composed.time = time;
+    composed.nominal = *nominal_state;
+    composed.full_pose = spline_state->pose;
+    composed.full_vel_enu = spline_state->v_world;
+    composed.full_vel_body = spline_state->v_body;
+    composed.full_omega_body = spline_state->w_body;
+    composed.full_accel_enu = spline_state->a_world;
+    composed.full_alpha_body = spline_state->alpha_body;
+    composed.full_bg = *bg_state;
+    composed.full_ba = *ba_state;
+
+    const Vector3d nominal_local_enu = Earth::GlobalToLocal(origin_blh_, nominal_state->blh);
+    const Sophus::SE3d nominal_pose(nominal_state->q_nb, nominal_local_enu);
+    composed.delta_pose = nominal_pose.inverse() * composed.full_pose;
+    composed.delta_bg = composed.full_bg - nominal_state->bg;
+    composed.delta_ba = composed.full_ba - nominal_state->ba;
+    return composed;
+}
+
 void System::UpdateNominalTrajectoryFromCurrentBiases() {
     std::vector<double> bias_times;
     bias_times.reserve(control_points_.size());
@@ -525,20 +677,12 @@ bool System::SaveOutputs() const {
     std::ofstream trajectory_ofs(trajectory_path);
     trajectory_ofs << "# time_s east_m north_m up_m qx qy qz qw\n";
     for (const auto& gnss : gnss_) {
-        const int start = FindSplineWindowStart(control_points_, config_.spline_dt_s, gnss.time);
-        if (start < 0) {
+        const auto composed = EvaluateComposedState(gnss.time);
+        if (!composed) {
             continue;
         }
-        const double u = (gnss.time - control_points_[start].Timestamp()) / config_.spline_dt_s;
-        const auto result = spline::BSplineEvaluator::Evaluate(
-            u,
-            config_.spline_dt_s,
-            control_points_[start + 0].Pose(),
-            control_points_[start + 1].Pose(),
-            control_points_[start + 2].Pose(),
-            control_points_[start + 3].Pose());
-        const Eigen::Quaterniond q(result.pose.so3().matrix());
-        const Vector3d t = result.pose.translation();
+        const Eigen::Quaterniond q(composed->full_pose.so3().matrix());
+        const Vector3d t = composed->full_pose.translation();
         trajectory_ofs << gnss.time << ' ' << t.x() << ' ' << t.y() << ' ' << t.z() << ' '
                        << q.x() << ' ' << q.y() << ' ' << q.z() << ' ' << q.w() << '\n';
     }
@@ -625,8 +769,28 @@ bool System::SaveOutputs() const {
                     << nav.ba.z() << '\n';
     }
 
+    const std::filesystem::path delta_path = config_.output_path / "delta_estimates.txt";
+    std::ofstream delta_ofs(delta_path);
+    delta_ofs << "# time_s dtheta_x_rad dtheta_y_rad dtheta_z_rad dbg_x_rps dbg_y_rps dbg_z_rps\n";
+    for (int imu_index = 0; imu_index < static_cast<int>(imu_.size()); imu_index += config_.imu_stride) {
+        const auto composed = EvaluateComposedState(imu_[imu_index].time);
+        if (!composed) {
+            continue;
+        }
+        const Sophus::Vector6d delta_xi = composed->delta_pose.log();
+        const Vector3d dtheta = delta_xi.tail<3>();
+        delta_ofs << std::setprecision(17)
+                  << composed->time << ' '
+                  << dtheta.x() << ' '
+                  << dtheta.y() << ' '
+                  << dtheta.z() << ' '
+                  << composed->full_bg.x() << ' '
+                  << composed->full_bg.y() << ' '
+                  << composed->full_bg.z() << '\n';
+    }
+
     LOG(INFO) << "Wrote outputs to " << config_.output_path.string();
-    return trajectory_ofs.good() && bias_ofs.good() && summary_ofs.good() && nominal_ofs.good();
+    return trajectory_ofs.good() && bias_ofs.good() && summary_ofs.good() && nominal_ofs.good() && delta_ofs.good();
 }
 
 }  // namespace ct_fgo_sim

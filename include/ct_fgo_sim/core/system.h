@@ -2,11 +2,13 @@
 
 #include "ct_fgo_sim/navigation/mechanization.h"
 #include "ct_fgo_sim/navigation/earth.h"
+#include "ct_fgo_sim/spline/bspline_evaluator.h"
 #include "ct_fgo_sim/spline/spline_initializer.h"
 #include "ct_fgo_sim/spline/control_point.h"
 #include "ct_fgo_sim/types.h"
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -58,11 +60,29 @@ struct AppConfig {
     bool use_imu_factors = true;
 };
 
+struct ComposedState {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    double time = 0.0;
+    NominalNavState nominal;
+    Sophus::SE3d full_pose = Sophus::SE3d();
+    Vector3d full_vel_enu = Vector3d::Zero();
+    Vector3d full_vel_body = Vector3d::Zero();
+    Vector3d full_omega_body = Vector3d::Zero();
+    Vector3d full_accel_enu = Vector3d::Zero();
+    Vector3d full_alpha_body = Vector3d::Zero();
+    Vector3d full_bg = Vector3d::Zero();
+    Vector3d full_ba = Vector3d::Zero();
+    Sophus::SE3d delta_pose = Sophus::SE3d();
+    Vector3d delta_bg = Vector3d::Zero();
+    Vector3d delta_ba = Vector3d::Zero();
+};
+
 class System {
 public:
     bool LoadConfig(const std::filesystem::path& config_path);
     bool Run();
     void Describe() const;
+    std::optional<ComposedState> EvaluateComposedState(double time) const;
 
 private:
     bool LoadMeasurements();
@@ -71,6 +91,11 @@ private:
     bool ResetControlPointsFromNominalTrajectory(bool reset_biases);
     bool BuildAndSolveProblem();
     bool SaveOutputs() const;
+    std::optional<spline::BSplineEvaluator::Result<double>> EvaluateSplineState(double time) const;
+    std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
+    std::optional<Vector3d> EvaluateBiasAtTime(
+        double time,
+        const std::vector<Vector3d>& bias_nodes) const;
     void UpdateNominalTrajectoryFromCurrentBiases();
 
     AppConfig config_;
