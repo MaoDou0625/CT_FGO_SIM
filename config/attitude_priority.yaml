@@ -1,0 +1,13 @@
+gnssfile: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_121901_use/transformed1cut1/rtk_ct_fgo_sim.txt"
+outputpath: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_attitude_priority/20260122_121901_use/transformed1cut1"
+
+starttime: 2387.9308
+endtime: 2520.0
+aligntime: 100.0
+
+imu_main:
+  file: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_121901_use/transformed1cut1/imu_ct_fgo_sim.txt"
+
+attitude_priority:
+  fix_height: true
+  clamp_vertical_velocity: true

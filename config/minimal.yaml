@@ -7,6 +7,21 @@ imu_main:
   rate_hz: 200.0
   antlever: [0.0, 0.0, 0.0]
 
+body_frame:
+  q_body_imu_xyzw: [0.0, 0.0, 0.0, 1.0]
+  q_body_imu_prior_sigma_rad: 0.1
+  enable_nhc: false
+  estimate_q_body_imu: true
+  nhc_enable_vx: false
+  nhc_enable_vy: true
+  nhc_enable_vz: true
+  nhc_target_vx_mps: 0.0
+  nhc_target_vy_mps: 0.0
+  nhc_target_vz_mps: 0.0
+  nhc_sigma_vx_mps: 1000000.0
+  nhc_sigma_vy_mps: 0.2
+  nhc_sigma_vz_mps: 0.2
+
 starttime: 0.0
 endtime: 0.0
 aligntime: 30.0

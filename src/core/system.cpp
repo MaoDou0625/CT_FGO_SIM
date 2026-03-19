@@ -1,8 +1,10 @@
 #include "ct_fgo_sim/core/system.h"
 
 #include "ct_fgo_sim/factors/bias_random_walk_factor.h"
+#include "ct_fgo_sim/factors/body_velocity_constraint_factor.h"
 #include "ct_fgo_sim/factors/continuous_gnss_factor.h"
 #include "ct_fgo_sim/factors/continuous_inertial_factor.h"
+#include "ct_fgo_sim/factors/quaternion_prior_factor.h"
 #include "ct_fgo_sim/io/text_measurement_io.h"
 
 #include <ceres/ceres.h>
@@ -120,8 +122,56 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     if (cfg["solver_max_iterations"]) {
         config_.solver_max_iterations = std::max(1, cfg["solver_max_iterations"].as<int>());
     }
+    if (cfg["use_gnss_factors"]) {
+        config_.use_gnss_factors = cfg["use_gnss_factors"].as<bool>();
+    }
     if (cfg["use_imu_factors"]) {
         config_.use_imu_factors = cfg["use_imu_factors"].as<bool>();
+    }
+    if (cfg["body_frame"]) {
+        const YAML::Node body = cfg["body_frame"];
+        if (body["q_body_imu_xyzw"]) {
+            const auto v = body["q_body_imu_xyzw"].as<std::vector<double>>();
+            if (v.size() == 4) {
+                config_.body_frame.q_body_imu = Eigen::Quaterniond(v[3], v[0], v[1], v[2]).normalized();
+            }
+        }
+        if (body["q_body_imu_prior_sigma_rad"]) {
+            config_.body_frame.q_body_imu_prior_sigma_rad = body["q_body_imu_prior_sigma_rad"].as<double>();
+        }
+        if (body["enable_nhc"]) {
+            config_.body_frame.enable_nhc = body["enable_nhc"].as<bool>();
+        }
+        if (body["estimate_q_body_imu"]) {
+            config_.body_frame.estimate_q_body_imu = body["estimate_q_body_imu"].as<bool>();
+        }
+        if (body["nhc_enable_vx"]) {
+            config_.body_frame.nhc_enable_vx = body["nhc_enable_vx"].as<bool>();
+        }
+        if (body["nhc_enable_vy"]) {
+            config_.body_frame.nhc_enable_vy = body["nhc_enable_vy"].as<bool>();
+        }
+        if (body["nhc_enable_vz"]) {
+            config_.body_frame.nhc_enable_vz = body["nhc_enable_vz"].as<bool>();
+        }
+        if (body["nhc_target_vx_mps"]) {
+            config_.body_frame.nhc_target_vx_mps = body["nhc_target_vx_mps"].as<double>();
+        }
+        if (body["nhc_target_vy_mps"]) {
+            config_.body_frame.nhc_target_vy_mps = body["nhc_target_vy_mps"].as<double>();
+        }
+        if (body["nhc_target_vz_mps"]) {
+            config_.body_frame.nhc_target_vz_mps = body["nhc_target_vz_mps"].as<double>();
+        }
+        if (body["nhc_sigma_vx_mps"]) {
+            config_.body_frame.nhc_sigma_vx_mps = body["nhc_sigma_vx_mps"].as<double>();
+        }
+        if (body["nhc_sigma_vy_mps"]) {
+            config_.body_frame.nhc_sigma_vy_mps = body["nhc_sigma_vy_mps"].as<double>();
+        }
+        if (body["nhc_sigma_vz_mps"]) {
+            config_.body_frame.nhc_sigma_vz_mps = body["nhc_sigma_vz_mps"].as<double>();
+        }
     }
 
     const YAML::Node imu = cfg["imu_main"];
@@ -140,6 +190,8 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     }
 
     lever_arm_ = config_.imu_main.antlever;
+    initial_q_body_imu_ = config_.body_frame.q_body_imu;
+    q_body_imu_ = initial_q_body_imu_;
     return true;
 }
 
@@ -175,7 +227,15 @@ void System::Describe() const {
     LOG(INFO) << "GNSS sigma(h/v): " << config_.gnss_sigma_horizontal_m << ", " << config_.gnss_sigma_vertical_m;
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
     LOG(INFO) << "IMU stride: " << config_.imu_stride;
+    LOG(INFO) << "Use GNSS factors: " << (config_.use_gnss_factors ? "true" : "false");
     LOG(INFO) << "Use IMU factors: " << (config_.use_imu_factors ? "true" : "false");
+    LOG(INFO) << "Enable body NHC: " << (config_.body_frame.enable_nhc ? "true" : "false");
+    LOG(INFO) << "Estimate q_body_imu: "
+              << ((config_.body_frame.enable_nhc && config_.body_frame.estimate_q_body_imu) ? "true" : "false");
+    LOG(INFO) << "NHC axes enabled (vx, vy, vz): "
+              << config_.body_frame.nhc_enable_vx << ", "
+              << config_.body_frame.nhc_enable_vy << ", "
+              << config_.body_frame.nhc_enable_vz;
 }
 
 bool System::LoadMeasurements() {
@@ -277,40 +337,54 @@ bool System::BuildAndSolveProblem() {
     }
     problem.AddParameterBlock(lever_arm_.data(), 3);
     problem.AddParameterBlock(&time_offset_s_, 1);
+    problem.AddParameterBlock(q_body_imu_.coeffs().data(), 4, new ceres::EigenQuaternionManifold);
     problem.SetParameterBlockConstant(control_points_.front().PoseData());
     problem.SetParameterBlockConstant(gyro_biases_.front().data());
     problem.SetParameterBlockConstant(accel_biases_.front().data());
     problem.SetParameterBlockConstant(lever_arm_.data());
     problem.SetParameterBlockConstant(&time_offset_s_);
+    if (!(config_.body_frame.enable_nhc && config_.body_frame.estimate_q_body_imu)) {
+        problem.SetParameterBlockConstant(q_body_imu_.coeffs().data());
+    }
+
+    problem.AddResidualBlock(
+        factors::QuaternionPriorFactor::Create(
+            config_.body_frame.q_body_imu,
+            config_.body_frame.q_body_imu_prior_sigma_rad),
+        nullptr,
+        q_body_imu_.coeffs().data());
 
     const Eigen::Matrix3d gnss_sqrt_info =
         BuildGnssSqrtInfo(config_.gnss_sigma_horizontal_m, config_.gnss_sigma_vertical_m);
     int gnss_factor_count = 0;
-    for (const auto& gnss : gnss_) {
-        const int start = FindSplineWindowStart(control_points_, config_.spline_dt_s, gnss.time);
-        if (start < 0) {
-            continue;
+    if (config_.use_gnss_factors) {
+        for (const auto& gnss : gnss_) {
+            const int start = FindSplineWindowStart(control_points_, config_.spline_dt_s, gnss.time);
+            if (start < 0) {
+                continue;
+            }
+            const Vector3d local_enu = Earth::GlobalToLocal(origin_blh_, gnss.blh);
+            ceres::CostFunction* cost = factors::ContinuousGnssFactor::Create(
+                gnss.time,
+                config_.spline_dt_s,
+                control_points_[start].Timestamp(),
+                local_enu,
+                gnss_sqrt_info);
+            problem.AddResidualBlock(
+                cost,
+                nullptr,
+                control_points_[start + 0].PoseData(),
+                control_points_[start + 1].PoseData(),
+                control_points_[start + 2].PoseData(),
+                control_points_[start + 3].PoseData(),
+                lever_arm_.data());
+            ++gnss_factor_count;
         }
-        const Vector3d local_enu = Earth::GlobalToLocal(origin_blh_, gnss.blh);
-        ceres::CostFunction* cost = factors::ContinuousGnssFactor::Create(
-            gnss.time,
-            config_.spline_dt_s,
-            control_points_[start].Timestamp(),
-            local_enu,
-            gnss_sqrt_info);
-        problem.AddResidualBlock(
-            cost,
-            nullptr,
-            control_points_[start + 0].PoseData(),
-            control_points_[start + 1].PoseData(),
-            control_points_[start + 2].PoseData(),
-            control_points_[start + 3].PoseData(),
-            lever_arm_.data());
-        ++gnss_factor_count;
     }
 
     int inertial_factor_count = 0;
     int bias_factor_count = 0;
+    int nhc_factor_count = 0;
     if (config_.use_imu_factors) {
         for (int imu_index = 0; imu_index < static_cast<int>(imu_.size()); imu_index += config_.imu_stride) {
             const auto& imu_meas = imu_[imu_index];
@@ -341,6 +415,37 @@ bool System::BuildAndSolveProblem() {
                 lever_arm_.data(),
                 &time_offset_s_);
             ++inertial_factor_count;
+
+            if (config_.body_frame.enable_nhc) {
+                const Eigen::Vector3i nhc_enable_axes(
+                    config_.body_frame.nhc_enable_vx ? 1 : 0,
+                    config_.body_frame.nhc_enable_vy ? 1 : 0,
+                    config_.body_frame.nhc_enable_vz ? 1 : 0);
+                const Eigen::Vector3d nhc_target(
+                    config_.body_frame.nhc_target_vx_mps,
+                    config_.body_frame.nhc_target_vy_mps,
+                    config_.body_frame.nhc_target_vz_mps);
+                const Eigen::Vector3d nhc_sigma(
+                    config_.body_frame.nhc_sigma_vx_mps,
+                    config_.body_frame.nhc_sigma_vy_mps,
+                    config_.body_frame.nhc_sigma_vz_mps);
+                ceres::CostFunction* nhc_cost = factors::BodyVelocityConstraintFactor::Create(
+                    imu_meas.time,
+                    config_.spline_dt_s,
+                    control_points_[start].Timestamp(),
+                    nhc_enable_axes,
+                    nhc_target,
+                    nhc_sigma);
+                problem.AddResidualBlock(
+                    nhc_cost,
+                    new ceres::HuberLoss(1.0),
+                    control_points_[start + 0].PoseData(),
+                    control_points_[start + 1].PoseData(),
+                    control_points_[start + 2].PoseData(),
+                    control_points_[start + 3].PoseData(),
+                    q_body_imu_.coeffs().data());
+                ++nhc_factor_count;
+            }
         }
 
         for (int i = 0; i + 1 < static_cast<int>(gyro_biases_.size()); ++i) {
@@ -372,6 +477,7 @@ bool System::BuildAndSolveProblem() {
     LOG(INFO) << "GNSS factors: " << gnss_factor_count;
     LOG(INFO) << "Inertial factors: " << inertial_factor_count;
     LOG(INFO) << "Bias RW factors: " << bias_factor_count;
+    LOG(INFO) << "Body NHC factors: " << nhc_factor_count;
     LOG(INFO) << summary.BriefReport();
     return summary.termination_type != ceres::FAILURE;
 }
@@ -415,6 +521,8 @@ bool System::SaveOutputs() const {
     summary_ofs << std::setprecision(17);
     summary_ofs << "gnss_file: " << config_.gnss_file << '\n';
     summary_ofs << "imu_file: " << config_.imu_main.file << '\n';
+    summary_ofs << "use_gnss_factors: " << config_.use_gnss_factors << '\n';
+    summary_ofs << "use_imu_factors: " << config_.use_imu_factors << '\n';
     summary_ofs << "gnss_count: " << gnss_.size() << '\n';
     summary_ofs << "imu_count: " << imu_.size() << '\n';
     summary_ofs << "control_point_count: " << control_points_.size() << '\n';
@@ -423,6 +531,24 @@ bool System::SaveOutputs() const {
                 << lever_arm_.x() << ' '
                 << lever_arm_.y() << ' '
                 << lever_arm_.z() << '\n';
+    summary_ofs << "q_body_imu_xyzw: "
+                << q_body_imu_.x() << ' '
+                << q_body_imu_.y() << ' '
+                << q_body_imu_.z() << ' '
+                << q_body_imu_.w() << '\n';
+    const Eigen::Quaterniond q_body_imu_delta = initial_q_body_imu_.conjugate() * q_body_imu_;
+    const double q_body_imu_delta_angle_rad =
+        2.0 * std::atan2(q_body_imu_delta.vec().norm(), std::abs(q_body_imu_delta.w()));
+    summary_ofs << "initial_q_body_imu_xyzw: "
+                << initial_q_body_imu_.x() << ' '
+                << initial_q_body_imu_.y() << ' '
+                << initial_q_body_imu_.z() << ' '
+                << initial_q_body_imu_.w() << '\n';
+    summary_ofs << "q_body_imu_delta_angle_rad: " << q_body_imu_delta_angle_rad << '\n';
+    summary_ofs << "nhc_enable_vx: " << config_.body_frame.nhc_enable_vx << '\n';
+    summary_ofs << "nhc_enable_vy: " << config_.body_frame.nhc_enable_vy << '\n';
+    summary_ofs << "nhc_enable_vz: " << config_.body_frame.nhc_enable_vz << '\n';
+    summary_ofs << "estimate_q_body_imu: " << config_.body_frame.estimate_q_body_imu << '\n';
     summary_ofs << "origin_blh_rad: "
                 << origin_blh_.x() << ' '
                 << origin_blh_.y() << ' '

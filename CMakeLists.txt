@@ -60,3 +60,12 @@ target_link_libraries(ct_fgo_sim_main
     PRIVATE
         ct_fgo_sim
 )
+
+add_executable(attitude_priority_main
+    apps/attitude_priority_main.cpp
+)
+
+target_link_libraries(attitude_priority_main
+    PRIVATE
+        ct_fgo_sim
+)
