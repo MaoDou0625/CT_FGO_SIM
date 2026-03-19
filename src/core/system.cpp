@@ -103,6 +103,9 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     if (cfg["imu_stride"]) {
         config_.imu_stride = std::max(1, cfg["imu_stride"].as<int>());
     }
+    if (cfg["outer_iterations"]) {
+        config_.outer_iterations = std::max(1, cfg["outer_iterations"].as<int>());
+    }
     if (cfg["solver_max_iterations"]) {
         config_.solver_max_iterations = std::max(1, cfg["solver_max_iterations"].as<int>());
     }
@@ -214,8 +217,15 @@ bool System::Run() {
               << ", " << initial_alignment_.window_end_time << "]";
     LOG(INFO) << "Static alignment reference time: " << initial_alignment_.reference_time;
 
-    if (!BuildAndSolveProblem()) {
-        return false;
+    for (int outer_iter = 0; outer_iter < config_.outer_iterations; ++outer_iter) {
+        LOG(INFO) << "Outer iteration " << (outer_iter + 1) << "/" << config_.outer_iterations;
+        if (!BuildAndSolveProblem()) {
+            return false;
+        }
+        if (outer_iter + 1 < config_.outer_iterations && !ResetControlPointsFromNominalTrajectory(false)) {
+            LOG(ERROR) << "Failed to reset control points from updated nominal trajectory";
+            return false;
+        }
     }
     return SaveOutputs();
 }
@@ -229,6 +239,7 @@ void System::Describe() const {
     LOG(INFO) << "GNSS sigma(h/v): " << config_.gnss_sigma_horizontal_m << ", " << config_.gnss_sigma_vertical_m;
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
     LOG(INFO) << "IMU stride: " << config_.imu_stride;
+    LOG(INFO) << "Outer iterations: " << config_.outer_iterations;
     LOG(INFO) << "Use GNSS factors: " << (config_.use_gnss_factors ? "true" : "false");
     LOG(INFO) << "Use IMU factors: " << (config_.use_imu_factors ? "true" : "false");
     LOG(INFO) << "Enable body NHC: " << (config_.body_frame.enable_nhc ? "true" : "false");
@@ -284,15 +295,46 @@ bool System::InitializeControlPoints() {
         return false;
     }
 
+    return ResetControlPointsFromNominalTrajectory(true);
+}
+
+bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
+    if (nominal_nav_.empty()) {
+        LOG(ERROR) << "Cannot reset control points from an empty nominal trajectory";
+        return false;
+    }
+
     std::vector<std::pair<double, Sophus::SE3d>> path;
     path.reserve(nominal_nav_.size());
     for (const auto& nav : nominal_nav_) {
         const Vector3d local_enu = Earth::GlobalToLocal(origin_blh_, nav.blh);
         path.emplace_back(nav.time, Sophus::SE3d(nav.q_nb, local_enu));
     }
-    control_points_ = spline::SplineInitializer::InitializeFromPath(path, config_.spline_dt_s);
-    gyro_biases_.assign(control_points_.size(), Vector3d::Zero());
-    accel_biases_.assign(control_points_.size(), Vector3d::Zero());
+
+    std::vector<spline::ControlPoint> new_control_points =
+        spline::SplineInitializer::InitializeFromPath(path, config_.spline_dt_s);
+    if (new_control_points.empty()) {
+        LOG(ERROR) << "Spline initialization from nominal trajectory produced no control points";
+        return false;
+    }
+
+    std::vector<Vector3d> new_gyro_biases(new_control_points.size(), Vector3d::Zero());
+    std::vector<Vector3d> new_accel_biases(new_control_points.size(), Vector3d::Zero());
+    if (!reset_biases) {
+        if (gyro_biases_.size() == new_control_points.size() &&
+            accel_biases_.size() == new_control_points.size()) {
+            new_gyro_biases = gyro_biases_;
+            new_accel_biases = accel_biases_;
+        } else {
+            LOG(WARNING) << "Bias node count changed from " << gyro_biases_.size()
+                         << " to " << new_control_points.size()
+                         << "; resetting bias warm start";
+        }
+    }
+
+    control_points_ = std::move(new_control_points);
+    gyro_biases_ = std::move(new_gyro_biases);
+    accel_biases_ = std::move(new_accel_biases);
     return !control_points_.empty();
 }
 
@@ -520,6 +562,7 @@ bool System::SaveOutputs() const {
     summary_ofs << "gnss_count: " << gnss_.size() << '\n';
     summary_ofs << "imu_count: " << imu_.size() << '\n';
     summary_ofs << "control_point_count: " << control_points_.size() << '\n';
+    summary_ofs << "outer_iterations: " << config_.outer_iterations << '\n';
     summary_ofs << "time_offset_s: " << time_offset_s_ << '\n';
     summary_ofs << "lever_arm_m: "
                 << lever_arm_.x() << ' '

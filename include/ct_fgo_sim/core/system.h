@@ -52,6 +52,7 @@ struct AppConfig {
     double accel_bias_rw_sigma = 1.0e-3;
     double bias_tau_s = 3600.0;
     int imu_stride = 10;
+    int outer_iterations = 1;
     int solver_max_iterations = 20;
     bool use_gnss_factors = true;
     bool use_imu_factors = true;
@@ -67,6 +68,7 @@ private:
     bool LoadMeasurements();
     void TrimMeasurementsToTimeWindow();
     bool InitializeControlPoints();
+    bool ResetControlPointsFromNominalTrajectory(bool reset_biases);
     bool BuildAndSolveProblem();
     bool SaveOutputs() const;
     void UpdateNominalTrajectoryFromCurrentBiases();
