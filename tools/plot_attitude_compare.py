@@ -11,12 +11,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-R_NED_TO_ENU = np.array([
-    [0.0, 1.0, 0.0],
-    [1.0, 0.0, 0.0],
-    [0.0, 0.0, -1.0],
-], dtype=float)
-
 R_FLU_TO_FRD = np.diag([1.0, -1.0, -1.0])
 
 
@@ -81,9 +75,9 @@ def load_kf_attitude(nav_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray
     pitch_out = np.empty_like(pitch_rad)
     yaw_out = np.empty_like(yaw_rad)
     for idx in range(len(time_s)):
-        rot_ned_frd = euler_to_rotmat(roll_rad[idx], pitch_rad[idx], yaw_rad[idx])
-        rot_enu_flu = R_NED_TO_ENU @ rot_ned_frd @ R_FLU_TO_FRD
-        roll_out[idx], pitch_out[idx], yaw_out[idx] = rotmat_to_euler(rot_enu_flu)
+        rot_kf_frd = euler_to_rotmat(roll_rad[idx], pitch_rad[idx], yaw_rad[idx])
+        rot_ct = R_FLU_TO_FRD @ rot_kf_frd @ R_FLU_TO_FRD
+        roll_out[idx], pitch_out[idx], yaw_out[idx] = rotmat_to_euler(rot_ct)
 
     return time_s, np.degrees(roll_out), np.degrees(pitch_out), np.degrees(np.unwrap(yaw_out))
 
