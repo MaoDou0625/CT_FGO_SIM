@@ -526,8 +526,14 @@ bool System::Run() {
             return false;
         }
         if (outer_iter + 1 < config_.outer_iterations) {
-            const bool yaw_feedback_applied = ApplyInitialYawFeedbackFromGnss();
-            if (!ResetControlPointsFromNominalTrajectory(yaw_feedback_applied)) {
+            ApplyInitialYawFeedbackFromGnss();
+        }
+        if (!InjectCurrentErrorStateIntoNominalTrajectory()) {
+            LOG(ERROR) << "Failed to inject current error-state estimate into nominal trajectory";
+            return false;
+        }
+        if (outer_iter + 1 < config_.outer_iterations) {
+            if (!ResetControlPointsFromNominalTrajectory(false)) {
                 LOG(ERROR) << "Failed to reset control points from updated nominal trajectory";
                 return false;
             }
@@ -790,7 +796,6 @@ bool System::BuildAndSolveProblem() {
     LOG(INFO) << "GNSS factors: " << gnss_factor_count;
     LOG(INFO) << "Interval propagation factors: " << process_factor_count;
     LOG(INFO) << summary.BriefReport();
-    UpdateNominalTrajectoryFromCurrentBiases();
     return summary.termination_type != ceres::FAILURE;
 }
 
@@ -1070,6 +1075,104 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
     composed.full_bg = nominal_state->bg + *delta_bg;
     composed.full_ba = nominal_state->ba + *delta_ba;
     return composed;
+}
+
+bool System::InjectCurrentErrorStateIntoNominalTrajectory() {
+    if (nominal_nav_.empty()) {
+        LOG(ERROR) << "Cannot inject error state into an empty nominal trajectory";
+        return false;
+    }
+    if (control_points_.empty()) {
+        return true;
+    }
+    if (control_points_.size() != delta_theta_nodes_.size() ||
+        control_points_.size() != delta_vel_nodes_.size() ||
+        control_points_.size() != delta_pos_nodes_.size() ||
+        control_points_.size() != delta_bg_nodes_.size() ||
+        control_points_.size() != delta_ba_nodes_.size()) {
+        LOG(ERROR) << "Node arrays are inconsistent with control-point count during error-state injection";
+        return false;
+    }
+
+    double max_delta_theta_norm = 0.0;
+    double max_delta_vel_norm = 0.0;
+    double max_delta_pos_norm = 0.0;
+    double max_delta_bg_norm = 0.0;
+    double max_delta_ba_norm = 0.0;
+
+    for (auto& nominal_state : nominal_nav_) {
+        const auto delta_theta = EvaluateNodeValueAtTime(nominal_state.time, delta_theta_nodes_);
+        const auto delta_vel = EvaluateNodeValueAtTime(nominal_state.time, delta_vel_nodes_);
+        const auto delta_pos = EvaluateNodeValueAtTime(nominal_state.time, delta_pos_nodes_);
+        const auto delta_bg = EvaluateNodeValueAtTime(nominal_state.time, delta_bg_nodes_);
+        const auto delta_ba = EvaluateNodeValueAtTime(nominal_state.time, delta_ba_nodes_);
+        if (!delta_theta || !delta_vel || !delta_pos || !delta_bg || !delta_ba) {
+            continue;
+        }
+
+        const Sophus::SO3d nominal_rot(nominal_state.q_nb);
+        nominal_state.q_nb = (nominal_rot * Sophus::SO3d::exp(*delta_theta)).unit_quaternion();
+        nominal_state.vel_ned += *delta_vel;
+        const Vector3d nominal_local_ned = Earth::GlobalToLocal(origin_blh_, nominal_state.blh);
+        nominal_state.blh = Earth::LocalToGlobal(origin_blh_, nominal_local_ned + *delta_pos);
+        nominal_state.bg += *delta_bg;
+        nominal_state.ba += *delta_ba;
+
+        max_delta_theta_norm = std::max(max_delta_theta_norm, delta_theta->norm());
+        max_delta_vel_norm = std::max(max_delta_vel_norm, delta_vel->norm());
+        max_delta_pos_norm = std::max(max_delta_pos_norm, delta_pos->norm());
+        max_delta_bg_norm = std::max(max_delta_bg_norm, delta_bg->norm());
+        max_delta_ba_norm = std::max(max_delta_ba_norm, delta_ba->norm());
+    }
+
+    if (!nominal_nav_.empty()) {
+        initial_alignment_.q_nb = nominal_nav_.front().q_nb;
+        initial_alignment_.vel0_ned = nominal_nav_.front().vel_ned;
+        initial_alignment_.bg0 = nominal_nav_.front().bg;
+        initial_alignment_.ba0 = nominal_nav_.front().ba;
+        initial_q_nb_ = initial_alignment_.q_nb;
+    }
+
+    for (auto& delta_theta : delta_theta_nodes_) {
+        delta_theta.setZero();
+    }
+    for (auto& delta_vel : delta_vel_nodes_) {
+        delta_vel.setZero();
+    }
+    for (auto& delta_pos : delta_pos_nodes_) {
+        delta_pos.setZero();
+    }
+    for (auto& delta_bg : delta_bg_nodes_) {
+        delta_bg.setZero();
+    }
+    for (auto& delta_ba : delta_ba_nodes_) {
+        delta_ba.setZero();
+    }
+
+    try {
+        BuildIntervalPropagationCache(
+            imu_,
+            nominal_nav_,
+            control_points_,
+            config_.imu_sigma_gyro_rps,
+            config_.imu_sigma_accel_mps2,
+            config_.gyro_bias_rw_sigma,
+            config_.accel_bias_rw_sigma,
+            config_.bias_tau_s,
+            interval_cache_);
+    } catch (const std::exception& ex) {
+        LOG(ERROR) << "BuildIntervalPropagationCache failed after error-state injection: " << ex.what();
+        return false;
+    } catch (...) {
+        LOG(ERROR) << "BuildIntervalPropagationCache failed with unknown exception after error-state injection";
+        return false;
+    }
+
+    LOG(INFO) << "Injected error-state nodes into nominal trajectory, max |dtheta|="
+              << max_delta_theta_norm << " rad, max |dv|=" << max_delta_vel_norm
+              << " m/s, max |dp|=" << max_delta_pos_norm << " m, max |dbg|="
+              << max_delta_bg_norm << " rad/s, max |dba|=" << max_delta_ba_norm << " m/s^2";
+    return true;
 }
 
 void System::UpdateNominalTrajectoryFromCurrentBiases() {

@@ -106,6 +106,7 @@ private:
     bool BuildAndSolveProblem();
     bool SaveOutputs() const;
     bool ApplyInitialYawFeedbackFromGnss();
+    bool InjectCurrentErrorStateIntoNominalTrajectory();
     std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
     std::optional<Vector3d> EvaluateNominalAccelAtTime(double time) const;
     std::optional<Vector3d> EvaluateNodeValueAtTime(
