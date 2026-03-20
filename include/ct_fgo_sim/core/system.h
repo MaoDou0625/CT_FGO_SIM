@@ -53,6 +53,11 @@ struct AppConfig {
     double gyro_bias_rw_sigma = 1.0e-4;
     double accel_bias_rw_sigma = 1.0e-3;
     double bias_tau_s = 3600.0;
+    bool enable_initial_yaw_feedback = false;
+    double initial_yaw_feedback_window_s = 20.0;
+    double initial_yaw_feedback_min_speed_mps = 0.5;
+    int initial_yaw_feedback_min_pairs = 10;
+    double initial_yaw_feedback_max_abs_rad = 0.7853981633974483;
     int imu_stride = 10;
     int outer_iterations = 1;
     int solver_max_iterations = 20;
@@ -100,6 +105,7 @@ private:
     bool ResetControlPointsFromNominalTrajectory(bool reset_biases);
     bool BuildAndSolveProblem();
     bool SaveOutputs() const;
+    bool ApplyInitialYawFeedbackFromGnss();
     std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
     std::optional<Vector3d> EvaluateNominalAccelAtTime(double time) const;
     std::optional<Vector3d> EvaluateNodeValueAtTime(
@@ -128,6 +134,8 @@ private:
     StaticAlignmentResult initial_alignment_;
     NominalNavStates nominal_nav_;
     IntervalPropagationCache interval_cache_;
+    bool initial_yaw_feedback_applied_ = false;
+    double initial_yaw_feedback_total_rad_ = 0.0;
 };
 
 }  // namespace ct_fgo_sim

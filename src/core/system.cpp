@@ -35,6 +35,21 @@ int FindSplineWindowStart(const spline::ControlPointArray& control_points, doubl
     return std::clamp(raw_index, 0, static_cast<int>(control_points.size()) - 4);
 }
 
+double WrapAngleRad(double angle_rad) {
+    while (angle_rad > M_PI) {
+        angle_rad -= 2.0 * M_PI;
+    }
+    while (angle_rad < -M_PI) {
+        angle_rad += 2.0 * M_PI;
+    }
+    return angle_rad;
+}
+
+double YawFromQuaternionNed(const Eigen::Quaterniond& q_nb) {
+    const Eigen::Matrix3d rot = q_nb.toRotationMatrix();
+    return std::atan2(rot(1, 0), rot(0, 0));
+}
+
 spline::ControlPointArray BuildKnotGridFromNominal(
     const NominalNavStates& nominal_nav,
     const Vector3d& origin_blh,
@@ -214,6 +229,24 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     }
     if (cfg["bias_tau_s"]) {
         config_.bias_tau_s = cfg["bias_tau_s"].as<double>();
+    }
+    if (cfg["initial_yaw_feedback"]) {
+        const YAML::Node yaw_feedback = cfg["initial_yaw_feedback"];
+        if (yaw_feedback["enable"]) {
+            config_.enable_initial_yaw_feedback = yaw_feedback["enable"].as<bool>();
+        }
+        if (yaw_feedback["window_s"]) {
+            config_.initial_yaw_feedback_window_s = yaw_feedback["window_s"].as<double>();
+        }
+        if (yaw_feedback["min_speed_mps"]) {
+            config_.initial_yaw_feedback_min_speed_mps = yaw_feedback["min_speed_mps"].as<double>();
+        }
+        if (yaw_feedback["min_pairs"]) {
+            config_.initial_yaw_feedback_min_pairs = std::max(1, yaw_feedback["min_pairs"].as<int>());
+        }
+        if (yaw_feedback["max_abs_deg"]) {
+            config_.initial_yaw_feedback_max_abs_rad = yaw_feedback["max_abs_deg"].as<double>() * kDegToRad;
+        }
     }
     if (cfg["imu_stride"]) {
         config_.imu_stride = std::max(1, cfg["imu_stride"].as<int>());
@@ -397,9 +430,12 @@ bool System::Run() {
         if (!BuildAndSolveProblem()) {
             return false;
         }
-        if (outer_iter + 1 < config_.outer_iterations && !ResetControlPointsFromNominalTrajectory(false)) {
-            LOG(ERROR) << "Failed to reset control points from updated nominal trajectory";
-            return false;
+        if (outer_iter + 1 < config_.outer_iterations) {
+            const bool yaw_feedback_applied = ApplyInitialYawFeedbackFromGnss();
+            if (!ResetControlPointsFromNominalTrajectory(yaw_feedback_applied)) {
+                LOG(ERROR) << "Failed to reset control points from updated nominal trajectory";
+                return false;
+            }
         }
     }
     return SaveOutputs();
@@ -419,6 +455,7 @@ void System::Describe() const {
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
     LOG(INFO) << "IMU stride: " << config_.imu_stride;
     LOG(INFO) << "Outer iterations: " << config_.outer_iterations;
+    LOG(INFO) << "Enable initial yaw feedback: " << (config_.enable_initial_yaw_feedback ? "true" : "false");
     LOG(INFO) << "Use GNSS factors: " << (config_.use_gnss_factors ? "true" : "false");
     LOG(INFO) << "Use IMU factors: " << (config_.use_imu_factors ? "true" : "false");
     LOG(INFO) << "Enable body NHC: " << (config_.body_frame.enable_nhc ? "true" : "false");
@@ -459,6 +496,7 @@ void System::TrimMeasurementsToTimeWindow() {
 }
 
 bool System::InitializeControlPoints() {
+    std::fprintf(stderr, "[probe] InitializeControlPoints enter\n");
     if (gnss_.empty()) {
         LOG(ERROR) << "Cannot initialize control points without GNSS";
         return false;
@@ -468,16 +506,25 @@ bool System::InitializeControlPoints() {
         return false;
     }
 
-    UpdateNominalTrajectoryFromCurrentBiases();
+    nominal_nav_ = PropagateNominalTrajectory(
+        imu_,
+        origin_blh_,
+        initial_alignment_,
+        {},
+        {},
+        {});
+    std::fprintf(stderr, "[probe] InitializeControlPoints after initial PropagateNominalTrajectory size=%zu\n", nominal_nav_.size());
     if (nominal_nav_.empty()) {
         LOG(ERROR) << "Nominal mechanization propagation failed";
         return false;
     }
 
+    std::fprintf(stderr, "[probe] InitializeControlPoints before ResetControlPointsFromNominalTrajectory\n");
     return ResetControlPointsFromNominalTrajectory(true);
 }
 
 bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
+    std::fprintf(stderr, "[probe] ResetControlPointsFromNominalTrajectory enter reset_biases=%d\n", reset_biases ? 1 : 0);
     if (nominal_nav_.empty()) {
         LOG(ERROR) << "Cannot reset control points from an empty nominal trajectory";
         return false;
@@ -485,6 +532,7 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
 
     spline::ControlPointArray new_control_points =
         BuildKnotGridFromNominal(nominal_nav_, origin_blh_, config_.spline_dt_s);
+    std::fprintf(stderr, "[probe] ResetControlPointsFromNominalTrajectory after BuildKnotGrid count=%zu\n", new_control_points.size());
     if (new_control_points.empty()) {
         LOG(ERROR) << "Knot grid initialization from nominal trajectory produced no control points";
         return false;
@@ -528,6 +576,8 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
         config_.gyro_bias_rw_sigma,
         config_.accel_bias_rw_sigma,
         config_.bias_tau_s);
+    std::fprintf(stderr, "[probe] ResetControlPointsFromNominalTrajectory after BuildIntervalPropagationCache knot_count=%zu imu_interval_count=%zu\n",
+                 interval_cache_.knot_intervals.size(), interval_cache_.imu_intervals.size());
     return !control_points_.empty();
 }
 
@@ -647,6 +697,81 @@ bool System::BuildAndSolveProblem() {
     return summary.termination_type != ceres::FAILURE;
 }
 
+bool System::ApplyInitialYawFeedbackFromGnss() {
+    if (!config_.enable_initial_yaw_feedback || initial_yaw_feedback_applied_ || gnss_.size() < 2) {
+        return false;
+    }
+
+    const double window_end_time = initial_alignment_.reference_time + config_.initial_yaw_feedback_window_s;
+    double weighted_sin = 0.0;
+    double weighted_cos = 0.0;
+    int pair_count = 0;
+
+    for (size_t i = 1; i < gnss_.size(); ++i) {
+        const double dt = gnss_[i].time - gnss_[i - 1].time;
+        if (dt <= 1.0e-3) {
+            continue;
+        }
+
+        const double mid_time = 0.5 * (gnss_[i].time + gnss_[i - 1].time);
+        if (mid_time < initial_alignment_.reference_time || mid_time > window_end_time) {
+            continue;
+        }
+
+        const Vector3d p_prev_ned = Earth::GlobalToLocal(origin_blh_, gnss_[i - 1].blh);
+        const Vector3d p_cur_ned = Earth::GlobalToLocal(origin_blh_, gnss_[i].blh);
+        const Vector3d v_ned = (p_cur_ned - p_prev_ned) / dt;
+        const double horizontal_speed = v_ned.head<2>().norm();
+        if (horizontal_speed < config_.initial_yaw_feedback_min_speed_mps) {
+            continue;
+        }
+
+        const auto composed = EvaluateComposedState(mid_time);
+        if (!composed) {
+            continue;
+        }
+
+        const double rtk_yaw = std::atan2(v_ned.y(), v_ned.x());
+        const Eigen::Quaterniond q_nb(Eigen::Matrix3d(composed->full_pose.so3().matrix()));
+        const double ct_yaw = YawFromQuaternionNed(q_nb);
+        const double yaw_error = WrapAngleRad(rtk_yaw - ct_yaw);
+        const double weight = std::min(horizontal_speed, 10.0);
+        weighted_sin += weight * std::sin(yaw_error);
+        weighted_cos += weight * std::cos(yaw_error);
+        ++pair_count;
+    }
+
+    if (pair_count < config_.initial_yaw_feedback_min_pairs) {
+        LOG(INFO) << "Skipping initial yaw feedback: only " << pair_count
+                  << " RTK heading pairs in the start window";
+        return false;
+    }
+
+    double yaw_correction = std::atan2(weighted_sin, weighted_cos);
+    yaw_correction = std::clamp(
+        yaw_correction,
+        -config_.initial_yaw_feedback_max_abs_rad,
+        config_.initial_yaw_feedback_max_abs_rad);
+
+    if (std::abs(yaw_correction) < 1.0e-4) {
+        LOG(INFO) << "Initial yaw feedback below threshold, skipping injection";
+        return false;
+    }
+
+    const Eigen::Quaterniond q_yaw_correction(Eigen::AngleAxisd(yaw_correction, Vector3d::UnitZ()));
+    initial_alignment_.q_nb = (q_yaw_correction * initial_alignment_.q_nb).normalized();
+    initial_q_nb_ = initial_alignment_.q_nb;
+    initial_yaw_feedback_applied_ = true;
+    initial_yaw_feedback_total_rad_ += yaw_correction;
+
+    LOG(INFO) << "Injected initial yaw feedback from RTK heading, correction = "
+              << yaw_correction << " rad (" << yaw_correction / kDegToRad << " deg)"
+              << ", pair_count = " << pair_count;
+
+    UpdateNominalTrajectoryFromCurrentBiases();
+    return true;
+}
+
 std::optional<Vector3d> System::EvaluateNodeValueAtTime(
     double time,
     const AlignedVec3Array& nodes) const {
@@ -742,6 +867,8 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
 }
 
 void System::UpdateNominalTrajectoryFromCurrentBiases() {
+    std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases enter cp=%zu dbg=%zu dba=%zu\n",
+                 control_points_.size(), delta_bg_nodes_.size(), delta_ba_nodes_.size());
     std::vector<double> bias_times;
     bias_times.reserve(control_points_.size());
     AlignedVec3Array full_bg_nodes;
@@ -769,6 +896,8 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
         }
     }
 
+    std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases before PropagateNominalTrajectory bias_times=%zu\n",
+                 bias_times.size());
     nominal_nav_ = PropagateNominalTrajectory(
         imu_,
         origin_blh_,
@@ -776,6 +905,8 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
         bias_times,
         full_bg_nodes,
         full_ba_nodes);
+    std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases after PropagateNominalTrajectory nominal=%zu\n",
+                 nominal_nav_.size());
 
     if (control_points_.size() == delta_bg_nodes_.size() &&
         control_points_.size() == delta_ba_nodes_.size()) {
@@ -789,15 +920,22 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
         }
     }
 
-    interval_cache_ = BuildIntervalPropagationCache(
-        imu_,
-        nominal_nav_,
-        control_points_,
-        config_.imu_sigma_gyro_rps,
-        config_.imu_sigma_accel_mps2,
-        config_.gyro_bias_rw_sigma,
-        config_.accel_bias_rw_sigma,
-        config_.bias_tau_s);
+    if (control_points_.size() >= 2) {
+        interval_cache_ = BuildIntervalPropagationCache(
+            imu_,
+            nominal_nav_,
+            control_points_,
+            config_.imu_sigma_gyro_rps,
+            config_.imu_sigma_accel_mps2,
+            config_.gyro_bias_rw_sigma,
+            config_.accel_bias_rw_sigma,
+            config_.bias_tau_s);
+        std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases after BuildIntervalPropagationCache knot=%zu imu_intervals=%zu\n",
+                     interval_cache_.knot_intervals.size(), interval_cache_.imu_intervals.size());
+    } else {
+        interval_cache_ = IntervalPropagationCache();
+        std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases skipped BuildIntervalPropagationCache (no control points yet)\n");
+    }
 }
 
 bool System::SaveOutputs() const {
@@ -837,6 +975,9 @@ bool System::SaveOutputs() const {
     summary_ofs << "imu_count: " << imu_.size() << '\n';
     summary_ofs << "control_point_count: " << control_points_.size() << '\n';
     summary_ofs << "outer_iterations: " << config_.outer_iterations << '\n';
+    summary_ofs << "enable_initial_yaw_feedback: " << config_.enable_initial_yaw_feedback << '\n';
+    summary_ofs << "initial_yaw_feedback_applied: " << initial_yaw_feedback_applied_ << '\n';
+    summary_ofs << "initial_yaw_feedback_total_rad: " << initial_yaw_feedback_total_rad_ << '\n';
     summary_ofs << "time_offset_s: " << time_offset_s_ << '\n';
     summary_ofs << "lever_arm_m: "
                 << lever_arm_.x() << ' '
