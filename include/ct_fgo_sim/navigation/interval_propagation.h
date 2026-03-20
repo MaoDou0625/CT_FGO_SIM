@@ -21,7 +21,7 @@ struct NominalImuInterval {
     Vector3d accel_n_mid = Vector3d::Zero();
 };
 
-using NominalImuIntervals = std::vector<NominalImuInterval, Eigen::aligned_allocator<NominalImuInterval>>;
+using NominalImuIntervals = std::vector<NominalImuInterval>;
 
 struct KnotIntervalPropagation {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -35,8 +35,7 @@ struct KnotIntervalPropagation {
     Eigen::Matrix<double, 15, 15> sqrt_info = Eigen::Matrix<double, 15, 15>::Identity();
 };
 
-using KnotIntervalPropagations =
-    std::vector<KnotIntervalPropagation, Eigen::aligned_allocator<KnotIntervalPropagation>>;
+using KnotIntervalPropagations = std::vector<KnotIntervalPropagation>;
 
 struct IntervalPropagationCache {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW

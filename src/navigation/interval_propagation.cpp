@@ -243,8 +243,6 @@ void BuildIntervalPropagationCache(
         return;
     }
 
-    std::fprintf(stderr, "[probe] BuildIntervalPropagationCache enter imu=%zu nominal=%zu cp=%zu\n",
-                 imu.size(), nominal_states.size(), control_points.size());
     const Matrix12d Qc = BuildQc(
         sigma_gyro_rps,
         sigma_accel_mps2,
@@ -253,9 +251,6 @@ void BuildIntervalPropagationCache(
         bias_tau_s);
     cache.imu_intervals.reserve(imu.size() - 1);
     for (size_t i = 1; i < imu.size() && i < nominal_states.size(); ++i) {
-        if (i % 20000 == 0) {
-            std::fprintf(stderr, "[probe] BuildIntervalPropagationCache imu interval progress i=%zu\n", i);
-        }
         const ImuMeasurement& meas = imu[i];
         if (meas.dt <= 1.0e-9) {
             continue;
@@ -291,8 +286,6 @@ void BuildIntervalPropagationCache(
 
         cache.imu_intervals.push_back(std::move(interval));
     }
-    std::fprintf(stderr, "[probe] BuildIntervalPropagationCache after imu interval build count=%zu\n",
-                 cache.imu_intervals.size());
 
     if (control_points.size() < 2 || cache.imu_intervals.empty()) {
         return;
@@ -301,9 +294,6 @@ void BuildIntervalPropagationCache(
     cache.knot_intervals.resize(control_points.size() - 1);
     size_t imu_cursor = 0;
     for (size_t i = 0; i + 1 < control_points.size(); ++i) {
-        if (i % 200 == 0 || i + 130 >= control_points.size()) {
-            std::fprintf(stderr, "[probe] BuildIntervalPropagationCache knot interval progress i=%zu\n", i);
-        }
         KnotIntervalPropagation knot_interval;
         knot_interval.start_time = control_points[i].Timestamp();
         knot_interval.end_time = control_points[i + 1].Timestamp();
@@ -377,11 +367,6 @@ void BuildIntervalPropagationCache(
         }
         cache.knot_intervals[i] = std::move(knot_interval);
     }
-
-    std::fprintf(stderr, "[probe] BuildIntervalPropagationCache after knot interval build count=%zu\n",
-                 cache.knot_intervals.size());
-
-    return;
 }
 
 std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(

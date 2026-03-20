@@ -358,15 +358,11 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
 }
 
 bool System::Run() {
-    std::fprintf(stderr, "[probe] Run: LoadMeasurements\n");
     if (!LoadMeasurements()) {
-        std::fprintf(stderr, "[probe] Run: LoadMeasurements failed\n");
         return false;
     }
-    std::fprintf(stderr, "[probe] Run: TrimMeasurementsToTimeWindow initial\n");
     TrimMeasurementsToTimeWindow();
     if (gnss_.empty() || imu_.empty()) {
-        std::fprintf(stderr, "[probe] Run: empty after initial trim gnss=%zu imu=%zu\n", gnss_.size(), imu_.size());
         LOG(ERROR) << "No measurements remain after initial time-window trimming";
         return false;
     }
@@ -382,14 +378,11 @@ bool System::Run() {
         initial_alignment_.ba0 = config_.init_ba_mps2;
     } else {
         origin_blh_ = gnss_.front().blh;
-        std::fprintf(stderr, "[probe] Run: EstimateInitialAlignment\n");
         initial_alignment_ = EstimateInitialAlignment(imu_, origin_blh_, config_.align_time_s);
         initial_q_nb_ = initial_alignment_.q_nb;
         config_.start_time = std::max(config_.start_time, initial_alignment_.reference_time);
-        std::fprintf(stderr, "[probe] Run: TrimMeasurementsToTimeWindow after alignment\n");
         TrimMeasurementsToTimeWindow();
         if (gnss_.empty() || imu_.empty()) {
-            std::fprintf(stderr, "[probe] Run: empty after alignment trim gnss=%zu imu=%zu\n", gnss_.size(), imu_.size());
             LOG(ERROR) << "No measurements remain after applying alignment reference time";
             return false;
         }
@@ -397,21 +390,16 @@ bool System::Run() {
     initial_q_nb_ = initial_alignment_.q_nb;
 
     if (IsPureInertialReplay()) {
-        std::fprintf(stderr, "[probe] Run: pure inertial UpdateNominalTrajectoryFromCurrentBiases\n");
         LOG(INFO) << "Pure inertial replay mode: skipping spline and optimization";
         UpdateNominalTrajectoryFromCurrentBiases();
         if (nominal_nav_.empty()) {
-            std::fprintf(stderr, "[probe] Run: nominal_nav empty in pure inertial\n");
             LOG(ERROR) << "Nominal mechanization propagation failed in pure inertial replay";
             return false;
         }
-        std::fprintf(stderr, "[probe] Run: pure inertial SaveOutputs\n");
         return SaveOutputs();
     }
 
-    std::fprintf(stderr, "[probe] Run: InitializeControlPoints\n");
     if (!InitializeControlPoints()) {
-        std::fprintf(stderr, "[probe] Run: InitializeControlPoints failed\n");
         return false;
     }
 
@@ -497,7 +485,6 @@ void System::TrimMeasurementsToTimeWindow() {
 }
 
 bool System::InitializeControlPoints() {
-    std::fprintf(stderr, "[probe] InitializeControlPoints enter\n");
     if (gnss_.empty()) {
         LOG(ERROR) << "Cannot initialize control points without GNSS";
         return false;
@@ -514,18 +501,15 @@ bool System::InitializeControlPoints() {
         {},
         {},
         {});
-    std::fprintf(stderr, "[probe] InitializeControlPoints after initial PropagateNominalTrajectory size=%zu\n", nominal_nav_.size());
     if (nominal_nav_.empty()) {
         LOG(ERROR) << "Nominal mechanization propagation failed";
         return false;
     }
 
-    std::fprintf(stderr, "[probe] InitializeControlPoints before ResetControlPointsFromNominalTrajectory\n");
     return ResetControlPointsFromNominalTrajectory(true);
 }
 
 bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
-    std::fprintf(stderr, "[probe] ResetControlPointsFromNominalTrajectory enter reset_biases=%d\n", reset_biases ? 1 : 0);
     if (nominal_nav_.empty()) {
         LOG(ERROR) << "Cannot reset control points from an empty nominal trajectory";
         return false;
@@ -533,7 +517,6 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
 
     spline::ControlPointArray new_control_points =
         BuildKnotGridFromNominal(nominal_nav_, origin_blh_, config_.spline_dt_s);
-    std::fprintf(stderr, "[probe] ResetControlPointsFromNominalTrajectory after BuildKnotGrid count=%zu\n", new_control_points.size());
     if (new_control_points.empty()) {
         LOG(ERROR) << "Knot grid initialization from nominal trajectory produced no control points";
         return false;
@@ -544,8 +527,6 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
     AlignedVec3Array new_delta_pos(new_control_points.size(), Vector3d::Zero());
     AlignedVec3Array new_delta_bg(new_control_points.size(), Vector3d::Zero());
     AlignedVec3Array new_delta_ba(new_control_points.size(), Vector3d::Zero());
-    std::fprintf(stderr, "[probe] ResetControlPointsFromNominalTrajectory after delta node allocation count=%zu\n",
-                 new_delta_theta.size());
     if (!reset_biases) {
         if (delta_theta_nodes_.size() == new_control_points.size() &&
             delta_vel_nodes_.size() == new_control_points.size() &&
@@ -570,8 +551,6 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
     delta_pos_nodes_ = std::move(new_delta_pos);
     delta_bg_nodes_ = std::move(new_delta_bg);
     delta_ba_nodes_ = std::move(new_delta_ba);
-    std::fprintf(stderr, "[probe] ResetControlPointsFromNominalTrajectory before BuildIntervalPropagationCache cp=%zu\n",
-                 control_points_.size());
     try {
         BuildIntervalPropagationCache(
             imu_,
@@ -590,8 +569,6 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
         LOG(ERROR) << "BuildIntervalPropagationCache failed with unknown exception";
         return false;
     }
-    std::fprintf(stderr, "[probe] ResetControlPointsFromNominalTrajectory after BuildIntervalPropagationCache knot_count=%zu imu_interval_count=%zu\n",
-                 interval_cache_.knot_intervals.size(), interval_cache_.imu_intervals.size());
     return !control_points_.empty();
 }
 
@@ -881,8 +858,6 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
 }
 
 void System::UpdateNominalTrajectoryFromCurrentBiases() {
-    std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases enter cp=%zu dbg=%zu dba=%zu\n",
-                 control_points_.size(), delta_bg_nodes_.size(), delta_ba_nodes_.size());
     std::vector<double> bias_times;
     bias_times.reserve(control_points_.size());
     AlignedVec3Array full_bg_nodes;
@@ -911,8 +886,6 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
         }
     }
 
-    std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases before PropagateNominalTrajectory bias_times=%zu\n",
-                 bias_times.size());
     nominal_nav_ = PropagateNominalTrajectory(
         imu_,
         origin_blh_,
@@ -920,8 +893,6 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
         bias_times,
         full_bg_nodes,
         full_ba_nodes);
-    std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases after PropagateNominalTrajectory nominal=%zu\n",
-                 nominal_nav_.size());
 
     if (!control_points_.empty() &&
         control_points_.size() == delta_bg_nodes_.size() &&
@@ -955,11 +926,8 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
             LOG(ERROR) << "BuildIntervalPropagationCache failed with unknown exception";
             interval_cache_ = IntervalPropagationCache();
         }
-        std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases after BuildIntervalPropagationCache knot=%zu imu_intervals=%zu\n",
-                     interval_cache_.knot_intervals.size(), interval_cache_.imu_intervals.size());
     } else {
         interval_cache_ = IntervalPropagationCache();
-        std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases skipped BuildIntervalPropagationCache (no control points yet)\n");
     }
 }
 
