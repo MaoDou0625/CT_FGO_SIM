@@ -11,16 +11,16 @@ struct ErrorStateAttitudeFactor {
     ErrorStateAttitudeFactor(
         double u,
         double dt,
-        const Eigen::Vector3d& gyro_meas,
+        const Eigen::Vector3d& gyro_meas_rps,
         const Eigen::Vector3d& nominal_gyro_body,
         const Eigen::Vector3d& nominal_bg,
-        double sigma_g)
+        double sigma_gyro_rps)
         : u_(u),
           dt_(dt),
-          gyro_meas_(gyro_meas),
+          gyro_meas_rps_(gyro_meas_rps),
           nominal_gyro_body_(nominal_gyro_body),
           nominal_bg_(nominal_bg),
-          sigma_g_(sigma_g) {}
+          sigma_gyro_rps_(sigma_gyro_rps) {}
 
     template <typename T>
     bool operator()(
@@ -42,28 +42,29 @@ struct ErrorStateAttitudeFactor {
         const Vec3T gyro_pred =
             nominal_gyro_body_.cast<T>() + nominal_bg_.cast<T>() + delta_bg + delta_theta_rate;
         Eigen::Map<Vec3T> res(residuals);
-        res = (gyro_meas_.cast<T>() - gyro_pred) / T(sigma_g_);
+        res = (gyro_meas_rps_.cast<T>() - gyro_pred) / T(sigma_gyro_rps_);
         return true;
     }
 
     static ceres::CostFunction* Create(
         double u,
         double dt,
-        const Eigen::Vector3d& gyro_meas,
+        const Eigen::Vector3d& gyro_meas_rps,
         const Eigen::Vector3d& nominal_gyro_body,
         const Eigen::Vector3d& nominal_bg,
-        double sigma_g) {
+        double sigma_gyro_rps) {
         return new ceres::AutoDiffCostFunction<ErrorStateAttitudeFactor, 3, 3, 3, 3, 3, 1>(
-            new ErrorStateAttitudeFactor(u, dt, gyro_meas, nominal_gyro_body, nominal_bg, sigma_g));
+            new ErrorStateAttitudeFactor(
+                u, dt, gyro_meas_rps, nominal_gyro_body, nominal_bg, sigma_gyro_rps));
     }
 
 private:
     double u_;
     double dt_;
-    Eigen::Vector3d gyro_meas_;
+    Eigen::Vector3d gyro_meas_rps_;
     Eigen::Vector3d nominal_gyro_body_;
     Eigen::Vector3d nominal_bg_;
-    double sigma_g_;
+    double sigma_gyro_rps_;
 };
 
 }  // namespace ct_fgo_sim::factors

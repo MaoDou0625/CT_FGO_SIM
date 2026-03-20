@@ -554,6 +554,9 @@ bool System::BuildAndSolveProblem() {
     if (config_.use_imu_factors) {
         for (int imu_index = 0; imu_index < static_cast<int>(imu_.size()); imu_index += config_.imu_stride) {
             const auto& imu_meas = imu_[imu_index];
+            if (imu_meas.dt <= 1.0e-9) {
+                continue;
+            }
             const int start = FindNodeIntervalStart(control_points_, imu_meas.time);
             if (start < 0 || start + 1 >= static_cast<int>(control_points_.size())) {
                 continue;
@@ -568,10 +571,11 @@ bool System::BuildAndSolveProblem() {
                 continue;
             }
             const double u = std::clamp((imu_meas.time - control_points_[start].Timestamp()) / dt, 0.0, 1.0);
+            const Vector3d gyro_meas_rps = imu_meas.dtheta / imu_meas.dt;
             ceres::CostFunction* cost = factors::ErrorStateAttitudeFactor::Create(
                 u,
                 dt,
-                imu_meas.dtheta,
+                gyro_meas_rps,
                 *nominal_gyro_center,
                 nominal_state->bg,
                 config_.imu_sigma_gyro_rps);
