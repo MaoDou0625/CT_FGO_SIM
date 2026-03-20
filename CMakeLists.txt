@@ -36,6 +36,7 @@ find_package(glog REQUIRED)
 
 add_library(ct_fgo_sim
     src/core/system.cpp
+    src/navigation/interval_propagation.cpp
     src/navigation/mechanization.cpp
 )
 

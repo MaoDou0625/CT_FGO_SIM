@@ -59,7 +59,7 @@ Eigen::Matrix3d BuildTriadFrame(const Vector3d& primary, const Vector3d& seconda
 }
 
 StaticAlignmentResult EstimateInitialAlignment(
-    const std::vector<ImuMeasurement>& imu,
+    const ImuMeasurementArray& imu,
     const Vector3d& origin_blh,
     double align_time_s) {
     StaticAlignmentResult result;
@@ -165,8 +165,8 @@ bool LoadConfig(const std::filesystem::path& path, AttitudePriorityConfig& confi
     return true;
 }
 
-std::vector<GnssMeasurement> TrimGnss(const std::vector<GnssMeasurement>& gnss, double start_time, double end_time) {
-    std::vector<GnssMeasurement> out;
+GnssMeasurementArray TrimGnss(const GnssMeasurementArray& gnss, double start_time, double end_time) {
+    GnssMeasurementArray out;
     for (const auto& m : gnss) {
         if (m.time >= start_time && m.time <= end_time) {
             out.push_back(m);
@@ -175,8 +175,8 @@ std::vector<GnssMeasurement> TrimGnss(const std::vector<GnssMeasurement>& gnss, 
     return out;
 }
 
-std::vector<ImuMeasurement> TrimImu(const std::vector<ImuMeasurement>& imu, double start_time, double end_time) {
-    std::vector<ImuMeasurement> out;
+ImuMeasurementArray TrimImu(const ImuMeasurementArray& imu, double start_time, double end_time) {
+    ImuMeasurementArray out;
     for (const auto& m : imu) {
         if (m.time >= start_time && m.time <= end_time) {
             out.push_back(m);

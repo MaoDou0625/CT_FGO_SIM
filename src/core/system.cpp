@@ -1,8 +1,7 @@
 #include "ct_fgo_sim/core/system.h"
 
-#include "ct_fgo_sim/factors/error_state_attitude_factor.h"
 #include "ct_fgo_sim/factors/error_state_gnss_factor.h"
-#include "ct_fgo_sim/factors/error_state_process_factor.h"
+#include "ct_fgo_sim/factors/error_state_interval_factor.h"
 #include "ct_fgo_sim/factors/quaternion_prior_factor.h"
 #include "ct_fgo_sim/io/text_measurement_io.h"
 
@@ -34,6 +33,57 @@ int FindSplineWindowStart(const spline::ControlPointArray& control_points, doubl
     const double t_first = control_points.front().Timestamp();
     const int raw_index = static_cast<int>(std::floor((t - t_first) / spline_dt_s));
     return std::clamp(raw_index, 0, static_cast<int>(control_points.size()) - 4);
+}
+
+spline::ControlPointArray BuildKnotGridFromNominal(
+    const NominalNavStates& nominal_nav,
+    const Vector3d& origin_blh,
+    double knot_dt_s) {
+    spline::ControlPointArray knots;
+    if (nominal_nav.empty() || knot_dt_s <= 0.0) {
+        return knots;
+    }
+
+    const double start_time = nominal_nav.front().time;
+    const double end_time = nominal_nav.back().time;
+    std::vector<double> knot_times;
+    for (double t = start_time; t < end_time - 1.0e-9; t += knot_dt_s) {
+        const auto upper = std::lower_bound(
+            nominal_nav.begin(),
+            nominal_nav.end(),
+            t,
+            [](const NominalNavState& state, double time) { return state.time < time; });
+        double snapped_time = t;
+        if (upper == nominal_nav.begin()) {
+            snapped_time = nominal_nav.front().time;
+        } else if (upper == nominal_nav.end()) {
+            snapped_time = nominal_nav.back().time;
+        } else {
+            const double t1 = upper->time;
+            const double t0 = (upper - 1)->time;
+            snapped_time = (std::abs(t1 - t) < std::abs(t - t0)) ? t1 : t0;
+        }
+        if (knot_times.empty() || std::abs(knot_times.back() - snapped_time) > 1.0e-9) {
+            knot_times.push_back(snapped_time);
+        }
+    }
+    if (knot_times.empty() || std::abs(knot_times.back() - nominal_nav.back().time) > 1.0e-9) {
+        knot_times.push_back(nominal_nav.back().time);
+    }
+    if (knot_times.size() == 1 && nominal_nav.size() >= 2) {
+        knot_times.push_back(nominal_nav.back().time);
+    }
+
+    knots.reserve(knot_times.size());
+    for (double t : knot_times) {
+        const auto nominal_state = EvaluateNominalState(nominal_nav, t);
+        if (!nominal_state) {
+            continue;
+        }
+        const Vector3d local_ned = Earth::GlobalToLocal(origin_blh, nominal_state->blh);
+        knots.emplace_back(t, Sophus::SE3d(nominal_state->q_nb, local_ned));
+    }
+    return knots;
 }
 
 int FindNodeIntervalStart(const spline::ControlPointArray& control_points, double t) {
@@ -433,17 +483,10 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
         return false;
     }
 
-    spline::SplineInitializer::Path path;
-    path.reserve(nominal_nav_.size());
-    for (const auto& nav : nominal_nav_) {
-        const Vector3d local_ned = Earth::GlobalToLocal(origin_blh_, nav.blh);
-        path.emplace_back(nav.time, Sophus::SE3d(nav.q_nb, local_ned));
-    }
-
     spline::ControlPointArray new_control_points =
-        spline::SplineInitializer::InitializeFromPath(path, config_.spline_dt_s);
+        BuildKnotGridFromNominal(nominal_nav_, origin_blh_, config_.spline_dt_s);
     if (new_control_points.empty()) {
-        LOG(ERROR) << "Spline initialization from nominal trajectory produced no control points";
+        LOG(ERROR) << "Knot grid initialization from nominal trajectory produced no control points";
         return false;
     }
 
@@ -476,6 +519,15 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
     delta_pos_nodes_ = std::move(new_delta_pos);
     delta_bg_nodes_ = std::move(new_delta_bg);
     delta_ba_nodes_ = std::move(new_delta_ba);
+    interval_cache_ = BuildIntervalPropagationCache(
+        imu_,
+        nominal_nav_,
+        control_points_,
+        config_.imu_sigma_gyro_rps,
+        config_.imu_sigma_accel_mps2,
+        config_.gyro_bias_rw_sigma,
+        config_.accel_bias_rw_sigma,
+        config_.bias_tau_s);
     return !control_points_.empty();
 }
 
@@ -549,76 +601,20 @@ bool System::BuildAndSolveProblem() {
         }
     }
 
-    int inertial_factor_count = 0;
     int process_factor_count = 0;
     if (config_.use_imu_factors) {
-        for (int imu_index = 0; imu_index < static_cast<int>(imu_.size()); imu_index += config_.imu_stride) {
-            const auto& imu_meas = imu_[imu_index];
-            if (imu_meas.dt <= 1.0e-9) {
-                continue;
-            }
-            const int start = FindNodeIntervalStart(control_points_, imu_meas.time);
-            if (start < 0 || start + 1 >= static_cast<int>(control_points_.size())) {
-                continue;
-            }
-            const auto nominal_gyro_center = EvaluateNominalGyroCenterAtTime(imu_meas.time);
-            const auto nominal_state = EvaluateNominalState(nominal_nav_, imu_meas.time);
-            if (!nominal_state || !nominal_gyro_center) {
-                continue;
-            }
-            const double dt = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
-            if (dt <= 1.0e-9) {
-                continue;
-            }
-            const double u = std::clamp((imu_meas.time - control_points_[start].Timestamp()) / dt, 0.0, 1.0);
-            const Vector3d gyro_meas_rps = imu_meas.dtheta / imu_meas.dt;
-            ceres::CostFunction* cost = factors::ErrorStateAttitudeFactor::Create(
-                u,
-                dt,
-                gyro_meas_rps,
-                *nominal_gyro_center,
-                nominal_state->bg,
-                config_.imu_sigma_gyro_rps);
-            problem.AddResidualBlock(
-                cost,
-                new ceres::HuberLoss(1.0),
-                delta_theta_nodes_[start].data(),
-                delta_theta_nodes_[start + 1].data(),
-                delta_bg_nodes_[start].data(),
-                delta_bg_nodes_[start + 1].data(),
-                &time_offset_s_);
-            ++inertial_factor_count;
-        }
-
         for (int i = 0; i + 1 < static_cast<int>(control_points_.size()); ++i) {
-            const double dt = control_points_[i + 1].Timestamp() - control_points_[i].Timestamp();
-            if (dt <= 1.0e-9) {
+            if (i >= static_cast<int>(interval_cache_.knot_intervals.size())) {
                 continue;
             }
-            const auto nominal_accel = EvaluateNominalAccelAtTime(control_points_[i].Timestamp());
-            const auto nominal_state = EvaluateNominalState(nominal_nav_, control_points_[i].Timestamp());
-            if (!nominal_accel || !nominal_state) {
+            const auto& knot_interval = interval_cache_.knot_intervals[static_cast<size_t>(i)];
+            if (!knot_interval.valid) {
                 continue;
             }
-            const Vector3d omega_ie_n = Earth::Iewn(nominal_state->blh.x());
-            const Vector3d omega_en_n = Earth::Wnen(nominal_state->blh, nominal_state->vel_ned);
-            const Vector3d gravity_n(0.0, 0.0, Earth::Gravity(nominal_state->blh));
-            const Vector3d specific_force_n =
-                *nominal_accel - gravity_n + (2.0 * omega_ie_n + omega_en_n).cross(nominal_state->vel_ned);
-            const Vector3d specific_force_b =
-                nominal_state->q_nb.toRotationMatrix().transpose() * specific_force_n;
             problem.AddResidualBlock(
-                factors::ErrorStateProcessFactor::Create(
-                    dt,
-                    nominal_state->blh,
-                    nominal_state->vel_ned,
-                    nominal_state->q_nb,
-                    specific_force_b,
-                    config_.imu_sigma_gyro_rps,
-                    config_.imu_sigma_accel_mps2,
-                    config_.gyro_bias_rw_sigma,
-                    config_.accel_bias_rw_sigma,
-                    config_.bias_tau_s),
+                factors::ErrorStateIntervalFactor::Create(
+                    knot_interval.phi,
+                    knot_interval.sqrt_info),
                 nullptr,
                 delta_theta_nodes_[i].data(),
                 delta_vel_nodes_[i].data(),
@@ -645,8 +641,7 @@ bool System::BuildAndSolveProblem() {
     ceres::Solve(options, &problem, &summary);
 
     LOG(INFO) << "GNSS factors: " << gnss_factor_count;
-    LOG(INFO) << "Attitude factors: " << inertial_factor_count;
-    LOG(INFO) << "Process factors: " << process_factor_count;
+    LOG(INFO) << "Interval propagation factors: " << process_factor_count;
     LOG(INFO) << summary.BriefReport();
     UpdateNominalTrajectoryFromCurrentBiases();
     return summary.termination_type != ceres::FAILURE;
@@ -679,82 +674,11 @@ std::optional<Vector3d> System::EvaluateNodeDerivativeAtTime(
 }
 
 std::optional<Vector3d> System::EvaluateNominalGyroCenterAtTime(double time) const {
-    if (nominal_nav_.size() < 2) {
-        return std::nullopt;
-    }
-
-    const auto upper = std::lower_bound(
-        nominal_nav_.begin(),
-        nominal_nav_.end(),
-        time,
-        [](const NominalNavState& state, double t) { return state.time < t; });
-    size_t i = 0;
-    size_t j = 1;
-    if (upper == nominal_nav_.begin()) {
-        i = 0;
-        j = 1;
-    } else if (upper == nominal_nav_.end()) {
-        i = nominal_nav_.size() - 2;
-        j = nominal_nav_.size() - 1;
-    } else {
-        j = static_cast<size_t>(std::distance(nominal_nav_.begin(), upper));
-        i = j - 1;
-    }
-
-    const double dt = nominal_nav_[j].time - nominal_nav_[i].time;
-    if (dt <= 1.0e-9) {
-        return std::nullopt;
-    }
-
-    const Eigen::Quaterniond q_i = nominal_nav_[i].q_nb;
-    const Eigen::Quaterniond q_j = nominal_nav_[j].q_nb;
-    const Eigen::Quaterniond q_delta = (q_i.conjugate() * q_j).normalized();
-    const Eigen::AngleAxisd aa(q_delta);
-    Vector3d rotvec_body = Vector3d::Zero();
-    if (std::abs(aa.angle()) > 1.0e-12) {
-        rotvec_body = aa.axis() * aa.angle();
-    }
-    const Vector3d nominal_w_body = rotvec_body / dt;
-
-    const auto nominal_state = EvaluateNominalState(nominal_nav_, time);
-    if (!nominal_state) {
-        return std::nullopt;
-    }
-
-    const Vector3d omega_ie_n = Earth::Iewn(nominal_state->blh.x());
-    const Vector3d omega_en_n = Earth::Wnen(nominal_state->blh, nominal_state->vel_ned);
-    const Vector3d omega_in_b = nominal_state->q_nb.toRotationMatrix().transpose() * (omega_ie_n + omega_en_n);
-    return nominal_w_body + omega_in_b;
+    return ct_fgo_sim::EvaluateNominalGyroCenterAtTime(interval_cache_, time);
 }
 
 std::optional<Vector3d> System::EvaluateNominalAccelAtTime(double time) const {
-    if (nominal_nav_.size() < 2) {
-        return std::nullopt;
-    }
-
-    const auto upper = std::lower_bound(
-        nominal_nav_.begin(),
-        nominal_nav_.end(),
-        time,
-        [](const NominalNavState& state, double t) { return state.time < t; });
-    size_t i = 0;
-    size_t j = 1;
-    if (upper == nominal_nav_.begin()) {
-        i = 0;
-        j = 1;
-    } else if (upper == nominal_nav_.end()) {
-        i = nominal_nav_.size() - 2;
-        j = nominal_nav_.size() - 1;
-    } else {
-        j = static_cast<size_t>(std::distance(nominal_nav_.begin(), upper));
-        i = j - 1;
-    }
-
-    const double dt = nominal_nav_[j].time - nominal_nav_[i].time;
-    if (dt <= 1.0e-9) {
-        return std::nullopt;
-    }
-    return (nominal_nav_[j].vel_ned - nominal_nav_[i].vel_ned) / dt;
+    return ct_fgo_sim::EvaluateNominalAccelAtTime(interval_cache_, time);
 }
 
 std::optional<ComposedState> System::EvaluateComposedState(double time) const {
@@ -864,6 +788,16 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
             delta_ba.setZero();
         }
     }
+
+    interval_cache_ = BuildIntervalPropagationCache(
+        imu_,
+        nominal_nav_,
+        control_points_,
+        config_.imu_sigma_gyro_rps,
+        config_.imu_sigma_accel_mps2,
+        config_.gyro_bias_rw_sigma,
+        config_.accel_bias_rw_sigma,
+        config_.bias_tau_s);
 }
 
 bool System::SaveOutputs() const {

@@ -1,9 +1,8 @@
 #pragma once
 
+#include "ct_fgo_sim/navigation/interval_propagation.h"
 #include "ct_fgo_sim/navigation/mechanization.h"
 #include "ct_fgo_sim/navigation/earth.h"
-#include "ct_fgo_sim/spline/bspline_evaluator.h"
-#include "ct_fgo_sim/spline/spline_initializer.h"
 #include "ct_fgo_sim/spline/control_point.h"
 #include "ct_fgo_sim/types.h"
 
@@ -128,6 +127,7 @@ private:
     Eigen::Quaterniond initial_q_nb_ = Eigen::Quaterniond::Identity();
     StaticAlignmentResult initial_alignment_;
     NominalNavStates nominal_nav_;
+    IntervalPropagationCache interval_cache_;
 };
 
 }  // namespace ct_fgo_sim
