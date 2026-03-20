@@ -1,11 +1,10 @@
 gnssfile: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_121901_use/transformed1cut1/rtk_ct_fgo_sim.txt"
-outputpath: "D:/Code/CT_FGO_SIM/output"
+outputpath: "D:/Code/CT_FGO_SIM/output_pure_inertial"
 
 imu_main:
-  file: "D:/Code/dataset/YuHangTuiChe/kf_gins_use/20260122_121901_use/transformed1cut1/imu_kfgins.txt"
+  file: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_121901_use/transformed1cut1/imu_ct_fgo_sim.txt"
   columns: 7
-  rate_hz: 1000.0
-  values_are_increments: true
+  rate_hz: 200.0
   antlever: [0.0, 0.0, 0.0]
 
 body_frame:
@@ -35,5 +34,7 @@ gyro_bias_rw_sigma: 1.0e-4
 accel_bias_rw_sigma: 1.0e-3
 bias_tau_s: 3600.0
 imu_stride: 10
-outer_iterations: 2
-solver_max_iterations: 15
+outer_iterations: 1
+solver_max_iterations: 1
+use_gnss_factors: false
+use_imu_factors: false

@@ -24,4 +24,6 @@ private:
     Sophus::SE3d pose_ = Sophus::SE3d();
 };
 
+using ControlPointArray = std::vector<ControlPoint, Eigen::aligned_allocator<ControlPoint>>;
+
 }  // namespace ct_fgo_sim::spline

@@ -66,14 +66,14 @@ def blh_rad_to_local_enu(blh_rad: np.ndarray, origin_blh_rad: np.ndarray) -> np.
     sin_lon = np.sin(lon0)
     cos_lon = np.cos(lon0)
 
-    cne = np.array(
+    ecef_to_enu = np.array(
         [
-            [-sin_lat * cos_lon, -sin_lon, -cos_lat * cos_lon],
-            [-sin_lat * sin_lon, cos_lon, -cos_lat * sin_lon],
-            [cos_lat, 0.0, -sin_lat],
+            [-sin_lon, cos_lon, 0.0],
+            [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat],
+            [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat],
         ]
     )
-    return np.column_stack([dx, dy, dz]) @ cne
+    return np.column_stack([dx, dy, dz]) @ ecef_to_enu.T
 
 
 def moving_average(signal: np.ndarray, window_samples: int) -> np.ndarray:

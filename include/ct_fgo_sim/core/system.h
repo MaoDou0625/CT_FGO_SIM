@@ -18,6 +18,7 @@ struct ImuConfig {
     std::string file;
     int columns = 7;
     double rate_hz = 0.0;
+    bool values_are_increments = true;
     Vector3d antlever = Vector3d::Zero();
 };
 
@@ -58,6 +59,12 @@ struct AppConfig {
     int solver_max_iterations = 20;
     bool use_gnss_factors = true;
     bool use_imu_factors = true;
+    bool use_explicit_init_state = false;
+    Vector3d init_pos_blh = Vector3d::Zero();
+    Vector3d init_vel_ned = Vector3d::Zero();
+    Vector3d init_att_rpy_rad = Vector3d::Zero();
+    Vector3d init_bg_rps = Vector3d::Zero();
+    Vector3d init_ba_mps2 = Vector3d::Zero();
 };
 
 struct ComposedState {
@@ -65,14 +72,16 @@ struct ComposedState {
     double time = 0.0;
     NominalNavState nominal;
     Sophus::SE3d full_pose = Sophus::SE3d();
-    Vector3d full_vel_enu = Vector3d::Zero();
+    Vector3d full_vel_ned = Vector3d::Zero();
     Vector3d full_vel_body = Vector3d::Zero();
     Vector3d full_omega_body = Vector3d::Zero();
-    Vector3d full_accel_enu = Vector3d::Zero();
+    Vector3d full_accel_ned = Vector3d::Zero();
     Vector3d full_alpha_body = Vector3d::Zero();
     Vector3d full_bg = Vector3d::Zero();
     Vector3d full_ba = Vector3d::Zero();
-    Sophus::SE3d delta_pose = Sophus::SE3d();
+    Vector3d delta_theta = Vector3d::Zero();
+    Vector3d delta_vel_ned = Vector3d::Zero();
+    Vector3d delta_pos_ned = Vector3d::Zero();
     Vector3d delta_bg = Vector3d::Zero();
     Vector3d delta_ba = Vector3d::Zero();
 };
@@ -85,25 +94,32 @@ public:
     std::optional<ComposedState> EvaluateComposedState(double time) const;
 
 private:
+    bool IsPureInertialReplay() const;
     bool LoadMeasurements();
     void TrimMeasurementsToTimeWindow();
     bool InitializeControlPoints();
     bool ResetControlPointsFromNominalTrajectory(bool reset_biases);
     bool BuildAndSolveProblem();
     bool SaveOutputs() const;
-    std::optional<spline::BSplineEvaluator::Result<double>> EvaluateSplineState(double time) const;
     std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
-    std::optional<Vector3d> EvaluateBiasAtTime(
+    std::optional<Vector3d> EvaluateNominalAccelAtTime(double time) const;
+    std::optional<Vector3d> EvaluateNodeValueAtTime(
         double time,
-        const std::vector<Vector3d>& bias_nodes) const;
+        const AlignedVec3Array& nodes) const;
+    std::optional<Vector3d> EvaluateNodeDerivativeAtTime(
+        double time,
+        const AlignedVec3Array& nodes) const;
     void UpdateNominalTrajectoryFromCurrentBiases();
 
     AppConfig config_;
-    std::vector<GnssMeasurement> gnss_;
-    std::vector<ImuMeasurement> imu_;
-    std::vector<spline::ControlPoint> control_points_;
-    std::vector<Vector3d> gyro_biases_;
-    std::vector<Vector3d> accel_biases_;
+    GnssMeasurementArray gnss_;
+    ImuMeasurementArray imu_;
+    spline::ControlPointArray control_points_;
+    AlignedVec3Array delta_theta_nodes_;
+    AlignedVec3Array delta_vel_nodes_;
+    AlignedVec3Array delta_pos_nodes_;
+    AlignedVec3Array delta_bg_nodes_;
+    AlignedVec3Array delta_ba_nodes_;
     Vector3d lever_arm_ = Vector3d::Zero();
     Eigen::Quaterniond initial_q_body_imu_ = Eigen::Quaterniond::Identity();
     Eigen::Quaterniond q_body_imu_ = Eigen::Quaterniond::Identity();

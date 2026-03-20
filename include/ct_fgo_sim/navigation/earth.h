@@ -79,14 +79,30 @@ public:
         return {kWgs84Wie * std::cos(lat_rad), 0.0, -kWgs84Wie * std::sin(lat_rad)};
     }
 
-    static Vector3d Wnen(const Vector3d& blh, const Vector3d& v_enu) {
+    static Vector3d Wnen(const Vector3d& blh, const Vector3d& v_ned) {
         const auto [rm, rn] = RmRn(blh.x());
         const double h = blh.z();
         return {
-            -v_enu.y() / (rm + h),
-             v_enu.x() / (rn + h),
-             v_enu.x() * std::tan(blh.x()) / (rn + h),
+             v_ned.y() / (rn + h),
+            -v_ned.x() / (rm + h),
+            -v_ned.y() * std::tan(blh.x()) / (rn + h),
         };
+    }
+
+    static Vector3d NedToEnu(const Vector3d& ned) {
+        return {ned.y(), ned.x(), -ned.z()};
+    }
+
+    static Vector3d EnuToNed(const Vector3d& enu) {
+        return {enu.y(), enu.x(), -enu.z()};
+    }
+
+    static Matrix3d RenuNed() {
+        Matrix3d rot = Matrix3d::Zero();
+        rot(0, 1) = 1.0;
+        rot(1, 0) = 1.0;
+        rot(2, 2) = -1.0;
+        return rot;
     }
 
 private:

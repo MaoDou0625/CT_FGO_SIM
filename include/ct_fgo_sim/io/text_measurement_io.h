@@ -27,9 +27,9 @@ inline std::vector<double> ParseNumericRow(const std::string& line) {
     return values;
 }
 
-inline std::vector<GnssMeasurement> LoadGnssFile(const std::filesystem::path& path) {
+inline GnssMeasurementArray LoadGnssFile(const std::filesystem::path& path) {
     std::ifstream ifs(path);
-    std::vector<GnssMeasurement> rows;
+    GnssMeasurementArray rows;
     std::string line;
     while (std::getline(ifs, line)) {
         const auto values = ParseNumericRow(line);
@@ -49,9 +49,9 @@ inline std::vector<GnssMeasurement> LoadGnssFile(const std::filesystem::path& pa
     return rows;
 }
 
-inline std::vector<ImuMeasurement> LoadImuFile(const std::filesystem::path& path) {
+inline ImuMeasurementArray LoadImuFile(const std::filesystem::path& path, bool values_are_increments = true) {
     std::ifstream ifs(path);
-    std::vector<ImuMeasurement> rows;
+    ImuMeasurementArray rows;
     std::string line;
     double prev_time = 0.0;
     bool first = true;
@@ -63,10 +63,16 @@ inline std::vector<ImuMeasurement> LoadImuFile(const std::filesystem::path& path
         ImuMeasurement meas;
         meas.time = values[0];
         meas.dt = first ? 0.0 : meas.time - prev_time;
-        // Expected format:
-        // time_s gyro_x_radps gyro_y_radps gyro_z_radps accel_x_mps2 accel_y_mps2 accel_z_mps2
+        // Default format follows KF-GINS:
+        // time_s dtheta_x_rad dtheta_y_rad dtheta_z_rad dvel_x_mps dvel_y_mps dvel_z_mps
+        // When values_are_increments=false, the six IMU columns are treated as rates/specific force
+        // and converted to increments using the current sample dt.
         meas.dtheta = Vector3d(values[1], values[2], values[3]);
         meas.dvel = Vector3d(values[4], values[5], values[6]);
+        if (!values_are_increments) {
+            meas.dtheta *= meas.dt;
+            meas.dvel *= meas.dt;
+        }
         rows.push_back(meas);
         prev_time = meas.time;
         first = false;

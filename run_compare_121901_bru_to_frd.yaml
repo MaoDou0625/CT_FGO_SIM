@@ -1,11 +1,10 @@
-gnssfile: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_121901_use/transformed1cut1/rtk_ct_fgo_sim.txt"
-outputpath: "D:/Code/CT_FGO_SIM/output"
+gnssfile: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_121901_use/transformed1cut1_bru_to_frd/rtk_ct_fgo_sim.txt"
+outputpath: "D:/Code/CT_FGO_SIM/output_bru_to_frd"
 
 imu_main:
-  file: "D:/Code/dataset/YuHangTuiChe/kf_gins_use/20260122_121901_use/transformed1cut1/imu_kfgins.txt"
+  file: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_121901_use/transformed1cut1_bru_to_frd/imu_ct_fgo_sim.txt"
   columns: 7
-  rate_hz: 1000.0
-  values_are_increments: true
+  rate_hz: 200.0
   antlever: [0.0, 0.0, 0.0]
 
 body_frame:

@@ -1,0 +1,33 @@
+imupath: "D:/Code/dataset/YuHangTuiChe/kf_gins_use/20260122_121901_use/transformed1cut1/imu_kfgins.txt"
+gnsspath: "D:/Code/CT_FGO_SIM/output_kf_pure_inertial_121901/fake_gnss_after_end.txt"
+outputpath: "D:/Code/CT_FGO_SIM/output_kf_pure_inertial_121901_yaw_plus_65p4"
+
+imudatalen: 7
+imudatarate: 1000
+
+starttime: 2387.9308
+endtime: 2520.0
+
+initpos: [ 30.4095831420, 119.9831832610, 16.2200 ]
+initvel: [ 0.0, 0.0, 0.0 ]
+initatt: [ -0.89556788, 0.43357974, 227.70680255 ]
+
+initgyrbias: [ 0, 0, 0 ]
+initaccbias: [ 0, 0, 0 ]
+initgyrscale: [ 0, 0, 0 ]
+initaccscale: [ 0, 0, 0 ]
+
+initposstd: [ 1.0, 1.0, 2.0 ]
+initvelstd: [ 0.1, 0.1, 0.1 ]
+initattstd: [ 0.5, 0.5, 2.0 ]
+
+imunoise:
+  arw: [0.24, 0.24, 0.24]
+  vrw: [0.24, 0.24, 0.24]
+  gbstd: [50.0, 50.0, 50.0]
+  abstd: [250.0, 250.0, 250.0]
+  gsstd: [1000.0, 1000.0, 1000.0]
+  asstd: [1000.0, 1000.0, 1000.0]
+  corrtime: 1.0
+
+antlever: [ 0.0, 0.0, 0.0 ]

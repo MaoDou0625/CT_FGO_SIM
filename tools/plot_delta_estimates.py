@@ -89,6 +89,51 @@ def save_matlab_fig(
         subprocess.run(["matlab", "-batch", f"run('{script_path.as_posix()}')"], check=True)
 
 
+def save_motion_matlab_fig(
+    output_fig_path: Path,
+    time_s: np.ndarray,
+    dv_mps: np.ndarray,
+    dp_m: np.ndarray,
+) -> None:
+    output_fig_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="ct_fgo_delta_motion_fig_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        dv_csv = tmp_dir / "dv_estimates.csv"
+        dp_csv = tmp_dir / "dp_estimates.csv"
+        script_path = tmp_dir / "make_delta_motion_fig.m"
+        np.savetxt(dv_csv, np.column_stack((time_s, dv_mps)), delimiter=",")
+        np.savetxt(dp_csv, np.column_stack((time_s, dp_m)), delimiter=",")
+
+        script = textwrap.dedent(
+            f"""
+            dv = readmatrix('{dv_csv.as_posix()}');
+            dp = readmatrix('{dp_csv.as_posix()}');
+            fig = figure('Visible', 'off', 'Position', [100, 100, 1200, 780]);
+            top_labels = {{'dv x (m/s)', 'dv y (m/s)', 'dv z (m/s)'}};
+            bottom_labels = {{'dp x (m)', 'dp y (m)', 'dp z (m)'}};
+            for idx = 1:3
+                subplot(2,3,idx);
+                plot(dv(:,1), dv(:,idx+1), 'LineWidth', 1.1);
+                grid on;
+                ylabel(top_labels{{idx}});
+            end
+            for idx = 1:3
+                subplot(2,3,idx+3);
+                plot(dp(:,1), dp(:,idx+1), 'LineWidth', 1.1);
+                grid on;
+                ylabel(bottom_labels{{idx}});
+            end
+            xlabel('Time (s)');
+            sgtitle('Estimated dv / dp');
+            savefig(fig, '{output_fig_path.as_posix()}');
+            close(fig);
+            exit;
+            """
+        ).strip()
+        script_path.write_text(script, encoding="utf-8")
+        subprocess.run(["matlab", "-batch", f"run('{script_path.as_posix()}')"], check=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot estimated dtheta and dbg.")
     parser.add_argument("--delta-file", type=Path, default=None, help="Path to delta_estimates.txt")
@@ -103,17 +148,21 @@ def main() -> None:
 
     if args.delta_file is not None and args.delta_file.exists():
         data = np.loadtxt(args.delta_file, comments="#")
-        if data.ndim != 2 or data.shape[1] < 7:
+        if data.ndim != 2 or data.shape[1] < 16:
             raise RuntimeError(f"Unexpected delta estimate format in {args.delta_file}")
         time_s = data[:, 0]
         dtheta_deg = np.degrees(data[:, 1:4])
-        dbg_rps = data[:, 4:7]
-        stacked = np.column_stack((dtheta_deg, dbg_rps))
+        dv_mps = data[:, 4:7]
+        dp_m = data[:, 7:10]
+        dbg_rps = data[:, 10:13]
+        stacked = np.column_stack((dtheta_deg, dv_mps, dp_m, dbg_rps))
         time_s, stacked = maybe_trim(time_s, stacked, args.start_time, args.end_time)
         if time_s.size == 0:
             raise RuntimeError("No delta estimate samples remain after trimming")
         dtheta_deg = stacked[:, 0:3]
-        dbg_rps = stacked[:, 3:6]
+        dv_mps = stacked[:, 3:6]
+        dp_m = stacked[:, 6:9]
+        dbg_rps = stacked[:, 9:12]
         output_dir = args.output_dir or args.delta_file.parent
     else:
         if args.nominal_nav is None or args.trajectory is None or args.bias_nodes is None:
@@ -135,6 +184,8 @@ def main() -> None:
             dtheta_deg[idx, :] = np.degrees(rotmat_to_rotvec(rot_delta))
         dbg_time = bias[:, 0]
         dbg_rps = bias[:, 1:4]
+        dv_mps = np.zeros((traj.shape[0], 3))
+        dp_m = np.zeros((traj.shape[0], 3))
 
         traj_time, dtheta_deg = maybe_trim(traj_time, dtheta_deg, args.start_time, args.end_time)
         dbg_time, dbg_rps = maybe_trim(dbg_time, dbg_rps, args.start_time, args.end_time)
@@ -172,9 +223,34 @@ def main() -> None:
         dbg_time_for_fig = dbg_time if 'dbg_time' in locals() else time_s
         save_matlab_fig(fig_path, time_s, dtheta_deg, dbg_time_for_fig, dbg_rps)
 
+    motion_fig, motion_axes = plt.subplots(2, 3, figsize=(13, 7), sharex=True)
+    dv_labels = ["dv x (m/s)", "dv y (m/s)", "dv z (m/s)"]
+    dp_labels = ["dp x (m)", "dp y (m)", "dp z (m)"]
+    for idx in range(3):
+        motion_axes[0, idx].plot(time_s, dv_mps[:, idx], linewidth=1.0)
+        motion_axes[0, idx].set_ylabel(dv_labels[idx])
+        motion_axes[0, idx].grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+        motion_axes[1, idx].plot(time_s, dp_m[:, idx], linewidth=1.0)
+        motion_axes[1, idx].set_ylabel(dp_labels[idx])
+        motion_axes[1, idx].grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+        motion_axes[1, idx].set_xlabel("Time (s)")
+
+    motion_fig.suptitle("Estimated dv / dp")
+    motion_fig.tight_layout()
+
+    motion_png_path = output_dir / "delta_motion_estimates.png"
+    motion_fig_path = output_dir / "delta_motion_estimates.fig"
+    motion_fig.savefig(motion_png_path, dpi=180)
+    plt.close(motion_fig)
+
+    if args.matlab_fig:
+        save_motion_matlab_fig(motion_fig_path, time_s, dv_mps, dp_m)
+
     print(f"Wrote {png_path}")
     if args.matlab_fig:
         print(f"Wrote {fig_path}")
+        print(f"Wrote {motion_fig_path}")
+    print(f"Wrote {motion_png_path}")
 
 
 if __name__ == "__main__":

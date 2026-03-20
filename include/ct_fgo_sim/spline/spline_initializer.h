@@ -11,8 +11,11 @@ namespace ct_fgo_sim::spline {
 
 class SplineInitializer {
 public:
-    static std::vector<ControlPoint> InitializeFromPath(
-        const std::vector<std::pair<double, Sophus::SE3d>>& path,
+    using PathPoint = std::pair<double, Sophus::SE3d>;
+    using Path = std::vector<PathPoint, Eigen::aligned_allocator<PathPoint>>;
+
+    static ControlPointArray InitializeFromPath(
+        const Path& path,
         double dt) {
         if (path.empty() || dt <= 0.0) {
             return {};
@@ -23,7 +26,7 @@ public:
         const double t_start = t_min - dt;
         const int count = static_cast<int>(std::ceil((t_max - t_min) / dt)) + 5;
 
-        std::vector<ControlPoint> cps;
+        ControlPointArray cps;
         cps.reserve(static_cast<size_t>(count));
         for (int i = 0; i < count; ++i) {
             const double t = t_start + i * dt;
@@ -34,7 +37,7 @@ public:
 
 private:
     static Sophus::SE3d Interpolate(
-        const std::vector<std::pair<double, Sophus::SE3d>>& path,
+        const Path& path,
         double t) {
         if (t <= path.front().first) {
             return path.front().second;
@@ -46,7 +49,7 @@ private:
             path.begin(),
             path.end(),
             t,
-            [](const std::pair<double, Sophus::SE3d>& lhs, double rhs) { return lhs.first < rhs; });
+            [](const PathPoint& lhs, double rhs) { return lhs.first < rhs; });
         const auto& p1 = *(it - 1);
         const auto& p2 = *it;
         const double a = (t - p1.first) / (p2.first - p1.first);

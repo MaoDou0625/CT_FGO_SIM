@@ -11,7 +11,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-R_FLU_TO_FRD = np.diag([1.0, -1.0, -1.0])
+R_ENU_FROM_NED = np.array([
+    [0.0, 1.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 0.0, -1.0],
+])
+
+
+def wrap_degrees(angle_deg: np.ndarray) -> np.ndarray:
+    return (angle_deg + 180.0) % 360.0 - 180.0
+
+
+def heading_degrees_0_360(angle_deg: np.ndarray) -> np.ndarray:
+    angle_deg = np.asarray(angle_deg, dtype=float)
+    out = np.mod(angle_deg, 360.0)
+    out[np.isnan(angle_deg)] = np.nan
+    return out
 
 
 def quat_to_euler_enu_xyzw(
@@ -25,7 +40,18 @@ def quat_to_euler_enu_xyzw(
     sinp = np.clip(sinp, -1.0, 1.0)
     pitch = np.arcsin(sinp)
     yaw = np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
-    return np.degrees(roll), np.degrees(pitch), np.degrees(np.unwrap(yaw))
+    return np.degrees(roll), np.degrees(pitch), wrap_degrees(np.degrees(yaw))
+
+
+def quat_to_rotmat_xyzw(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    return np.array(
+        [
+            [1.0 - 2.0 * (qy * qy + qz * qz), 2.0 * (qx * qy - qz * qw), 2.0 * (qx * qz + qy * qw)],
+            [2.0 * (qx * qy + qz * qw), 1.0 - 2.0 * (qx * qx + qz * qz), 2.0 * (qy * qz - qx * qw)],
+            [2.0 * (qx * qz - qy * qw), 2.0 * (qy * qz + qx * qw), 1.0 - 2.0 * (qx * qx + qy * qy)],
+        ],
+        dtype=float,
+    )
 
 
 def euler_to_rotmat(roll_rad: float, pitch_rad: float, yaw_rad: float) -> np.ndarray:
@@ -46,6 +72,69 @@ def rotmat_to_euler(rot: np.ndarray) -> tuple[float, float, float]:
     return roll, pitch, yaw
 
 
+def blh_rad_to_local_enu(blh_rad: np.ndarray, origin_blh_rad: np.ndarray) -> np.ndarray:
+    lat0, lon0, h0 = origin_blh_rad
+    lat = blh_rad[:, 1]
+    lon = blh_rad[:, 2]
+    h = blh_rad[:, 3]
+
+    a = 6378137.0
+    e2 = 0.0066943799901413156
+
+    def rn(phi: np.ndarray) -> np.ndarray:
+        return a / np.sqrt(1.0 - e2 * np.sin(phi) ** 2)
+
+    rn0 = rn(np.array([lat0]))[0]
+    x0 = (rn0 + h0) * np.cos(lat0) * np.cos(lon0)
+    y0 = (rn0 + h0) * np.cos(lat0) * np.sin(lon0)
+    z0 = (rn0 * (1.0 - e2) + h0) * np.sin(lat0)
+
+    rn1 = rn(lat)
+    x = (rn1 + h) * np.cos(lat) * np.cos(lon)
+    y = (rn1 + h) * np.cos(lat) * np.sin(lon)
+    z = (rn1 * (1.0 - e2) + h) * np.sin(lat)
+
+    dx = x - x0
+    dy = y - y0
+    dz = z - z0
+
+    sin_lat = np.sin(lat0)
+    cos_lat = np.cos(lat0)
+    sin_lon = np.sin(lon0)
+    cos_lon = np.cos(lon0)
+
+    ecef_to_enu = np.array(
+        [
+            [-sin_lon, cos_lon, 0.0],
+            [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat],
+            [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat],
+        ]
+    )
+    return np.column_stack([dx, dy, dz]) @ ecef_to_enu.T
+
+
+def load_rtk_velocity_heading(
+    rtk_path: Path,
+    speed_threshold_mps: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    data = np.loadtxt(rtk_path, comments="#")
+    if data.ndim != 2 or data.shape[1] < 4:
+        raise RuntimeError(f"Unexpected RTK shape in {rtk_path}")
+
+    time_s = data[:, 0]
+    pos_enu = blh_rad_to_local_enu(data, data[0, 1:4])
+    vel_enu = np.empty_like(pos_enu)
+    vel_enu[1:-1] = (pos_enu[2:] - pos_enu[:-2]) / (time_s[2:, None] - time_s[:-2, None])
+    vel_enu[0] = (pos_enu[1] - pos_enu[0]) / (time_s[1] - time_s[0])
+    vel_enu[-1] = (pos_enu[-1] - pos_enu[-2]) / (time_s[-1] - time_s[-2])
+
+    speed_h = np.linalg.norm(vel_enu[:, :2], axis=1)
+    # NED heading convention: yaw is measured from North toward East.
+    yaw_deg = heading_degrees_0_360(np.degrees(np.arctan2(vel_enu[:, 0], vel_enu[:, 1])))
+    yaw_deg[speed_h < speed_threshold_mps] = np.nan
+    return time_s, yaw_deg
+
+
 def load_ct_attitude(nav_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     data = np.loadtxt(nav_path, comments="#")
     if data.ndim != 2:
@@ -57,8 +146,20 @@ def load_ct_attitude(nav_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray
     else:
         qx, qy, qz, qw = data[:, 4], data[:, 5], data[:, 6], data[:, 7]
 
-    roll_deg, pitch_deg, yaw_deg = quat_to_euler_enu_xyzw(qx, qy, qz, qw)
-    return time_s, roll_deg, pitch_deg, yaw_deg
+    roll_out = np.empty_like(time_s)
+    pitch_out = np.empty_like(time_s)
+    yaw_out = np.empty_like(time_s)
+    for idx in range(len(time_s)):
+        rot_ct_enu_flu = quat_to_rotmat_xyzw(qx[idx], qy[idx], qz[idx], qw[idx])
+        # CT output quaternions are already expressed in the vehicle/body convention.
+        # For NED plotting we only need to rotate the navigation basis ENU -> NED.
+        rot_ct_ned_frd = R_ENU_FROM_NED.T @ rot_ct_enu_flu
+        roll_rad, pitch_rad, yaw_rad = rotmat_to_euler(rot_ct_ned_frd)
+        roll_out[idx] = np.degrees(roll_rad)
+        pitch_out[idx] = np.degrees(pitch_rad)
+        yaw_out[idx] = np.degrees(yaw_rad)
+    yaw_out = heading_degrees_0_360(yaw_out)
+    return time_s, roll_out, pitch_out, yaw_out
 
 
 def load_kf_attitude(nav_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -67,19 +168,10 @@ def load_kf_attitude(nav_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray
         raise RuntimeError(f"Unexpected KF nav shape in {nav_path}")
 
     time_s = data[:, 1]
-    roll_rad = np.radians(data[:, 8])
-    pitch_rad = np.radians(data[:, 9])
-    yaw_rad = np.radians(data[:, 10])
-
-    roll_out = np.empty_like(roll_rad)
-    pitch_out = np.empty_like(pitch_rad)
-    yaw_out = np.empty_like(yaw_rad)
-    for idx in range(len(time_s)):
-        rot_kf_frd = euler_to_rotmat(roll_rad[idx], pitch_rad[idx], yaw_rad[idx])
-        rot_ct = R_FLU_TO_FRD @ rot_kf_frd @ R_FLU_TO_FRD
-        roll_out[idx], pitch_out[idx], yaw_out[idx] = rotmat_to_euler(rot_ct)
-
-    return time_s, np.degrees(roll_out), np.degrees(pitch_out), np.degrees(np.unwrap(yaw_out))
+    roll_deg = data[:, 8]
+    pitch_deg = data[:, 9]
+    yaw_deg = heading_degrees_0_360(data[:, 10])
+    return time_s, roll_deg, pitch_deg, yaw_deg
 
 
 def maybe_trim(
@@ -143,20 +235,30 @@ def save_matlab_fig(
     kf_yaw: np.ndarray,
     ct_label: str,
     kf_label: str,
+    rtk_time: np.ndarray | None = None,
+    rtk_yaw: np.ndarray | None = None,
+    rtk_label: str | None = None,
 ) -> None:
     output_fig_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="ct_fgo_matlab_fig_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
         ct_csv = tmp_dir / "ct_attitude.csv"
         kf_csv = tmp_dir / "kf_attitude.csv"
+        rtk_csv = tmp_dir / "rtk_heading.csv"
         script_path = tmp_dir / "make_attitude_compare_fig.m"
         np.savetxt(ct_csv, np.column_stack((ct_time, ct_roll, ct_pitch, ct_yaw)), delimiter=",")
         np.savetxt(kf_csv, np.column_stack((kf_time, kf_roll, kf_pitch, kf_yaw)), delimiter=",")
+        if rtk_time is not None and rtk_yaw is not None:
+            np.savetxt(rtk_csv, np.column_stack((rtk_time, rtk_yaw)), delimiter=",")
 
         script = textwrap.dedent(
             f"""
             ct = readmatrix('{ct_csv.as_posix()}');
             kf = readmatrix('{kf_csv.as_posix()}');
+            has_rtk = {1 if rtk_time is not None and rtk_yaw is not None else 0};
+            if has_rtk
+                rtk = readmatrix('{rtk_csv.as_posix()}');
+            end
             fig = figure('Visible', 'off', 'Position', [100, 100, 1100, 780]);
             labels = {{'Roll (deg)', 'Pitch (deg)', 'Yaw (deg)'}};
             for idx = 1:3
@@ -164,12 +266,15 @@ def save_matlab_fig(
                 plot(ct(:,1), ct(:,idx+1), 'LineWidth', 1.2, 'DisplayName', '{ct_label}');
                 hold on;
                 plot(kf(:,1), kf(:,idx+1), 'LineWidth', 1.0, 'DisplayName', '{kf_label}');
+                if has_rtk && idx == 3
+                    plot(rtk(:,1), rtk(:,2), 'LineWidth', 1.0, 'DisplayName', '{rtk_label or "RTK heading"}');
+                end
                 grid on;
                 ylabel(labels{{idx}});
                 legend('Location', 'best');
             end
             xlabel('Time (s)');
-            sgtitle('Attitude Comparison');
+            sgtitle('Attitude Comparison (NED)');
             savefig(fig, '{output_fig_path.as_posix()}');
             close(fig);
             exit;
@@ -194,6 +299,9 @@ def plot_and_save(
     ct_label: str,
     kf_label: str,
     matlab_fig: bool,
+    rtk_time: np.ndarray | None = None,
+    rtk_yaw: np.ndarray | None = None,
+    rtk_label: str = "RTK diff heading",
 ) -> None:
     fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
     series = [
@@ -209,6 +317,10 @@ def plot_and_save(
         ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
         ax.legend(loc="best")
 
+    if rtk_time is not None and rtk_yaw is not None:
+        axes[2].plot(rtk_time, rtk_yaw, linewidth=1.0, label=rtk_label)
+        axes[2].legend(loc="best")
+
     axes[-1].set_xlabel("Time (s)")
     fig.suptitle(title)
     fig.tight_layout()
@@ -218,7 +330,7 @@ def plot_and_save(
             output_fig_path,
             ct_time, ct_roll, ct_pitch, ct_yaw,
             kf_time, kf_roll, kf_pitch, kf_yaw,
-            ct_label, kf_label,
+            ct_label, kf_label, rtk_time, rtk_yaw, rtk_label,
         )
     else:
         save_fig_pickle(fig, output_fig_path)
@@ -229,17 +341,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Plot CT vs KF attitude comparison.")
     parser.add_argument("--ct-nav", required=True, type=Path, help="Path to trajectory_enu.txt or nominal_nav.txt")
     parser.add_argument("--kf-nav", required=True, type=Path, help="Path to KF_GINS_Navresult.nav")
+    parser.add_argument("--rtk", type=Path, default=None, help="Optional RTK file for velocity-differenced heading overlay")
     parser.add_argument("--full-nav", type=Path, default=None, help="Optional path to trajectory_enu.txt for full-state plot")
     parser.add_argument("--output-dir", type=Path, default=None, help="Output directory; defaults to CT nav parent")
     parser.add_argument("--start-time", type=float, default=None, help="Optional start time in seconds")
     parser.add_argument("--end-time", type=float, default=None, help="Optional end time in seconds")
     parser.add_argument("--ct-label", default="CT", help="Legend label for CT line")
     parser.add_argument("--kf-label", default="KF-GINS", help="Legend label for KF line")
+    parser.add_argument("--rtk-label", default="RTK diff heading", help="Legend label for RTK-derived heading")
+    parser.add_argument("--rtk-speed-threshold", type=float, default=0.5, help="Minimum horizontal speed for RTK heading")
     parser.add_argument("--matlab-fig", action="store_true", help="Also export a MATLAB-readable .fig via matlab -batch")
     args = parser.parse_args()
 
     ct_time, ct_roll, ct_pitch, ct_yaw = load_ct_attitude(args.ct_nav)
     kf_time, kf_roll, kf_pitch, kf_yaw = load_kf_attitude(args.kf_nav)
+    rtk_heading: tuple[np.ndarray, np.ndarray] | None = None
+    if args.rtk is not None:
+        rtk_heading = load_rtk_velocity_heading(args.rtk, args.rtk_speed_threshold)
 
     common_start, common_end = compute_common_time_window(
         ct_time, kf_time, args.start_time, args.end_time)
@@ -248,6 +366,12 @@ def main() -> None:
         ct_time, ct_roll, ct_pitch, ct_yaw, common_start, common_end)
     kf_time, kf_roll, kf_pitch, kf_yaw = maybe_trim(
         kf_time, kf_roll, kf_pitch, kf_yaw, common_start, common_end)
+    rtk_time = None
+    rtk_yaw = None
+    if rtk_heading is not None:
+        rtk_time, _, _, rtk_yaw = maybe_trim(
+            rtk_heading[0], np.zeros_like(rtk_heading[1]), np.zeros_like(rtk_heading[1]), rtk_heading[1],
+            common_start, common_end)
     require_nonempty(ct_time, "CT attitude", common_start, common_end)
     require_nonempty(kf_time, "KF attitude", common_start, common_end)
 
@@ -259,10 +383,10 @@ def main() -> None:
     plot_and_save(
         nominal_png_path,
         nominal_fig_path,
-        "Attitude Comparison (Nominal vs KF)",
+        "Attitude Comparison (Nominal vs KF, NED)",
         ct_time, ct_roll, ct_pitch, ct_yaw,
         kf_time, kf_roll, kf_pitch, kf_yaw,
-        args.ct_label, args.kf_label, args.matlab_fig,
+        args.ct_label, args.kf_label, args.matlab_fig, rtk_time, rtk_yaw, args.rtk_label,
     )
     print(f"Wrote {nominal_png_path}")
     print(f"Wrote {nominal_fig_path}")
@@ -281,6 +405,12 @@ def main() -> None:
             full_time, full_roll, full_pitch, full_yaw, full_common_start, full_common_end)
         full_kf_time, full_kf_roll, full_kf_pitch, full_kf_yaw = maybe_trim(
             kf_time, kf_roll, kf_pitch, kf_yaw, full_common_start, full_common_end)
+        full_rtk_time = None
+        full_rtk_yaw = None
+        if rtk_heading is not None:
+            full_rtk_time, _, _, full_rtk_yaw = maybe_trim(
+                rtk_heading[0], np.zeros_like(rtk_heading[1]), np.zeros_like(rtk_heading[1]), rtk_heading[1],
+                full_common_start, full_common_end)
         require_nonempty(full_time, "CT full attitude", full_common_start, full_common_end)
         require_nonempty(full_kf_time, "KF attitude", full_common_start, full_common_end)
 
@@ -289,10 +419,10 @@ def main() -> None:
         plot_and_save(
             full_png_path,
             full_fig_path,
-            "Attitude Comparison (Full vs KF)",
+            "Attitude Comparison (Full vs KF, NED)",
             full_time, full_roll, full_pitch, full_yaw,
             full_kf_time, full_kf_roll, full_kf_pitch, full_kf_yaw,
-            "CT full", args.kf_label, args.matlab_fig,
+            "CT full", args.kf_label, args.matlab_fig, full_rtk_time, full_rtk_yaw, args.rtk_label,
         )
         print(f"Wrote {full_png_path}")
         print(f"Wrote {full_fig_path}")
