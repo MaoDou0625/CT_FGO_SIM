@@ -18,6 +18,24 @@ R_ENU_FROM_NED = np.array([
 ])
 
 
+def load_output_time_origin(output_dir: Path) -> float | None:
+    summary_path = output_dir / "run_summary.txt"
+    if not summary_path.exists():
+        return None
+    for line in summary_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("output_time_origin_s:"):
+            return float(line.split(":", 1)[1].strip())
+    return None
+
+
+def maybe_to_relative_time(time_s: np.ndarray, output_time_origin_s: float | None) -> np.ndarray:
+    if output_time_origin_s is None:
+        return time_s
+    if np.nanmin(time_s) > output_time_origin_s * 0.5:
+        return time_s - output_time_origin_s
+    return time_s
+
+
 def wrap_degrees(angle_deg: np.ndarray) -> np.ndarray:
     return (angle_deg + 180.0) % 360.0 - 180.0
 
@@ -352,12 +370,16 @@ def main() -> None:
     parser.add_argument("--rtk-speed-threshold", type=float, default=0.5, help="Minimum horizontal speed for RTK heading")
     parser.add_argument("--matlab-fig", action="store_true", help="Also export a MATLAB-readable .fig via matlab -batch")
     args = parser.parse_args()
+    output_dir = args.output_dir or args.ct_nav.parent
+    output_time_origin_s = load_output_time_origin(output_dir)
 
     ct_time, ct_roll, ct_pitch, ct_yaw = load_ct_attitude(args.ct_nav)
     kf_time, kf_roll, kf_pitch, kf_yaw = load_kf_attitude(args.kf_nav)
+    kf_time = maybe_to_relative_time(kf_time, output_time_origin_s)
     rtk_heading: tuple[np.ndarray, np.ndarray] | None = None
     if args.rtk is not None:
-        rtk_heading = load_rtk_velocity_heading(args.rtk, args.rtk_speed_threshold)
+        rtk_time, rtk_yaw = load_rtk_velocity_heading(args.rtk, args.rtk_speed_threshold)
+        rtk_heading = (maybe_to_relative_time(rtk_time, output_time_origin_s), rtk_yaw)
 
     common_start, common_end = compute_common_time_window(
         ct_time, kf_time, args.start_time, args.end_time)
@@ -375,7 +397,6 @@ def main() -> None:
     require_nonempty(ct_time, "CT attitude", common_start, common_end)
     require_nonempty(kf_time, "KF attitude", common_start, common_end)
 
-    output_dir = args.output_dir or args.ct_nav.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
     nominal_png_path = output_dir / "attitude_compare.png"

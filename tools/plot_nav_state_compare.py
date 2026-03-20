@@ -18,6 +18,24 @@ R_ENU_FROM_NED = np.array([
 ])
 
 
+def load_output_time_origin(output_dir: Path) -> float | None:
+    summary_path = output_dir / "run_summary.txt"
+    if not summary_path.exists():
+        return None
+    for line in summary_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("output_time_origin_s:"):
+            return float(line.split(":", 1)[1].strip())
+    return None
+
+
+def maybe_to_relative_time(time_s: np.ndarray, output_time_origin_s: float | None) -> np.ndarray:
+    if output_time_origin_s is None:
+        return time_s
+    if np.nanmin(time_s) > output_time_origin_s * 0.5:
+        return time_s - output_time_origin_s
+    return time_s
+
+
 def wrap_degrees(angle_deg: np.ndarray) -> np.ndarray:
     return (angle_deg + 180.0) % 360.0 - 180.0
 
@@ -260,11 +278,14 @@ def main() -> None:
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    output_time_origin_s = load_output_time_origin(args.output_dir)
 
     ct_pose_time, ct_pos, ct_att = load_ct_pose(args.traj)
     ct_vel_time, ct_vel = load_ct_velocity(args.delta, args.nominal_nav)
     kf_time, kf_vel, kf_att = load_kf_nav(args.kf_nav)
     rtk_time, rtk_pos = load_rtk_nav(args.rtk)
+    kf_time = maybe_to_relative_time(kf_time, output_time_origin_s)
+    rtk_time = maybe_to_relative_time(rtk_time, output_time_origin_s)
 
     att_start, att_end = intersect_window(ct_pose_time, kf_time)
     ct_att_time, ct_att = trim_series(ct_pose_time, ct_att, att_start, att_end)

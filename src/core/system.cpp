@@ -286,6 +286,7 @@ bool System::Run() {
         LOG(ERROR) << "No measurements remain after initial time-window trimming";
         return false;
     }
+    output_time_origin_s_ = std::min(gnss_.front().time, imu_.front().time);
 
     if (config_.use_explicit_init_state) {
         origin_blh_ = config_.init_pos_blh;
@@ -867,7 +868,7 @@ bool System::SaveOutputs() const {
         }
         const Eigen::Quaterniond q = QnbNedToQebEnu(Eigen::Quaterniond(composed->full_pose.so3().matrix()));
         const Vector3d t = NedToEnu(composed->full_pose.translation());
-        trajectory_ofs << gnss.time << ' ' << t.x() << ' ' << t.y() << ' ' << t.z() << ' '
+        trajectory_ofs << (gnss.time - output_time_origin_s_) << ' ' << t.x() << ' ' << t.y() << ' ' << t.z() << ' '
                        << q.x() << ' ' << q.y() << ' ' << q.z() << ' ' << q.w() << '\n';
     }
 
@@ -875,7 +876,7 @@ bool System::SaveOutputs() const {
     std::ofstream bias_ofs(bias_path);
     bias_ofs << "# time_s d_bgx d_bgy d_bgz d_bax d_bay d_baz\n";
     for (size_t i = 0; i < control_points_.size(); ++i) {
-        bias_ofs << control_points_[i].Timestamp() << ' '
+        bias_ofs << (control_points_[i].Timestamp() - output_time_origin_s_) << ' '
                  << delta_bg_nodes_[i].x() << ' ' << delta_bg_nodes_[i].y() << ' ' << delta_bg_nodes_[i].z() << ' '
                  << delta_ba_nodes_[i].x() << ' ' << delta_ba_nodes_[i].y() << ' ' << delta_ba_nodes_[i].z() << '\n';
     }
@@ -923,9 +924,16 @@ bool System::SaveOutputs() const {
                 << initial_q_nb_.y() << ' '
                 << initial_q_nb_.z() << ' '
                 << initial_q_nb_.w() << '\n';
+    summary_ofs << "output_time_origin_s: " << output_time_origin_s_ << '\n';
     summary_ofs << "alignment_window_start_time_s: " << initial_alignment_.window_start_time << '\n';
     summary_ofs << "alignment_window_end_time_s: " << initial_alignment_.window_end_time << '\n';
     summary_ofs << "alignment_reference_time_s: " << initial_alignment_.reference_time << '\n';
+    summary_ofs << "alignment_window_start_time_rel_s: "
+                << (initial_alignment_.window_start_time - output_time_origin_s_) << '\n';
+    summary_ofs << "alignment_window_end_time_rel_s: "
+                << (initial_alignment_.window_end_time - output_time_origin_s_) << '\n';
+    summary_ofs << "alignment_reference_time_rel_s: "
+                << (initial_alignment_.reference_time - output_time_origin_s_) << '\n';
     summary_ofs << "initial_bg0_rps: " << initial_alignment_.bg0.transpose() << '\n';
     summary_ofs << "initial_ba0_mps2: " << initial_alignment_.ba0.transpose() << '\n';
 
@@ -936,7 +944,7 @@ bool System::SaveOutputs() const {
         const Vector3d vel_enu = NedToEnu(nav.vel_ned);
         const Eigen::Quaterniond q_enu = QnbNedToQebEnu(nav.q_nb);
         nominal_ofs << std::setprecision(17)
-                    << nav.time << ' '
+                    << (nav.time - output_time_origin_s_) << ' '
                     << nav.blh.x() << ' '
                     << nav.blh.y() << ' '
                     << nav.blh.z() << ' '
@@ -967,7 +975,7 @@ bool System::SaveOutputs() const {
         const Vector3d delta_vel_enu = NedToEnu(composed->delta_vel_ned);
         const Vector3d delta_pos_enu = NedToEnu(composed->delta_pos_ned);
         delta_ofs << std::setprecision(17)
-                  << composed->time << ' '
+                  << (composed->time - output_time_origin_s_) << ' '
                   << composed->delta_theta.x() << ' '
                   << composed->delta_theta.y() << ' '
                   << composed->delta_theta.z() << ' '
