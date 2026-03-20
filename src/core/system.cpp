@@ -815,9 +815,22 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
     for (const auto& control_point : control_points_) {
         bias_times.push_back(control_point.Timestamp());
     }
-    for (size_t i = 0; i < control_points_.size(); ++i) {
-        full_bg_nodes.push_back(initial_alignment_.bg0);
-        full_ba_nodes.push_back(initial_alignment_.ba0);
+
+    double max_delta_bg_norm = 0.0;
+    double max_delta_ba_norm = 0.0;
+    if (control_points_.size() == delta_bg_nodes_.size() &&
+        control_points_.size() == delta_ba_nodes_.size()) {
+        for (size_t i = 0; i < control_points_.size(); ++i) {
+            full_bg_nodes.push_back(initial_alignment_.bg0 + delta_bg_nodes_[i]);
+            full_ba_nodes.push_back(initial_alignment_.ba0 + delta_ba_nodes_[i]);
+            max_delta_bg_norm = std::max(max_delta_bg_norm, delta_bg_nodes_[i].norm());
+            max_delta_ba_norm = std::max(max_delta_ba_norm, delta_ba_nodes_[i].norm());
+        }
+    } else {
+        for (size_t i = 0; i < control_points_.size(); ++i) {
+            full_bg_nodes.push_back(initial_alignment_.bg0);
+            full_ba_nodes.push_back(initial_alignment_.ba0);
+        }
     }
 
     nominal_nav_ = PropagateNominalTrajectory(
@@ -827,6 +840,18 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
         bias_times,
         full_bg_nodes,
         full_ba_nodes);
+
+    if (control_points_.size() == delta_bg_nodes_.size() &&
+        control_points_.size() == delta_ba_nodes_.size()) {
+        LOG(INFO) << "Closed-loop bias feedback injected into nominal mechanization, max |delta_bg|="
+                  << max_delta_bg_norm << " rad/s, max |delta_ba|=" << max_delta_ba_norm << " m/s^2";
+        for (auto& delta_bg : delta_bg_nodes_) {
+            delta_bg.setZero();
+        }
+        for (auto& delta_ba : delta_ba_nodes_) {
+            delta_ba.setZero();
+        }
+    }
 }
 
 bool System::SaveOutputs() const {
