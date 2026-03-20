@@ -124,7 +124,6 @@ private:
     Eigen::Quaterniond initial_q_body_imu_ = Eigen::Quaterniond::Identity();
     Eigen::Quaterniond q_body_imu_ = Eigen::Quaterniond::Identity();
     double time_offset_s_ = 0.0;
-    double output_time_origin_s_ = 0.0;
     Vector3d origin_blh_ = Vector3d::Zero();
     Eigen::Quaterniond initial_q_nb_ = Eigen::Quaterniond::Identity();
     StaticAlignmentResult initial_alignment_;
