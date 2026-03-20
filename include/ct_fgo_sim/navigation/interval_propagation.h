@@ -17,14 +17,8 @@ struct NominalImuInterval {
     double mid_time = 0.0;
     double dt = 0.0;
     size_t imu_index = 0;
-    NominalNavState start_state;
-    NominalNavState mid_state;
-    NominalNavState end_state;
     Vector3d omega_ib_b_nom = Vector3d::Zero();
-    Vector3d specific_force_b_nom = Vector3d::Zero();
     Vector3d accel_n_mid = Vector3d::Zero();
-    Eigen::Matrix<double, 15, 15> phi = Eigen::Matrix<double, 15, 15>::Identity();
-    Eigen::Matrix<double, 15, 15> q = Eigen::Matrix<double, 15, 15>::Zero();
 };
 
 using NominalImuIntervals = std::vector<NominalImuInterval, Eigen::aligned_allocator<NominalImuInterval>>;
@@ -50,7 +44,7 @@ struct IntervalPropagationCache {
     KnotIntervalPropagations knot_intervals;
 };
 
-IntervalPropagationCache BuildIntervalPropagationCache(
+void BuildIntervalPropagationCache(
     const ImuMeasurementArray& imu,
     const NominalNavStates& nominal_states,
     const spline::ControlPointArray& control_points,
@@ -58,7 +52,8 @@ IntervalPropagationCache BuildIntervalPropagationCache(
     double sigma_accel_mps2,
     double sigma_bg_std,
     double sigma_ba_std,
-    double bias_tau_s);
+    double bias_tau_s,
+    IntervalPropagationCache& cache);
 
 std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(
     const IntervalPropagationCache& cache,

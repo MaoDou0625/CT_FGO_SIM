@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace ct_fgo_sim {
 
@@ -226,7 +227,7 @@ std::optional<size_t> FindImuIntervalIndex(
 
 }  // namespace
 
-IntervalPropagationCache BuildIntervalPropagationCache(
+void BuildIntervalPropagationCache(
     const ImuMeasurementArray& imu,
     const NominalNavStates& nominal_states,
     const spline::ControlPointArray& control_points,
@@ -234,14 +235,27 @@ IntervalPropagationCache BuildIntervalPropagationCache(
     double sigma_accel_mps2,
     double sigma_bg_std,
     double sigma_ba_std,
-    double bias_tau_s) {
-    IntervalPropagationCache cache;
+    double bias_tau_s,
+    IntervalPropagationCache& cache) {
+    cache.imu_intervals.clear();
+    cache.knot_intervals.clear();
     if (imu.size() < 2 || nominal_states.size() < 2) {
-        return cache;
+        return;
     }
 
+    std::fprintf(stderr, "[probe] BuildIntervalPropagationCache enter imu=%zu nominal=%zu cp=%zu\n",
+                 imu.size(), nominal_states.size(), control_points.size());
+    const Matrix12d Qc = BuildQc(
+        sigma_gyro_rps,
+        sigma_accel_mps2,
+        sigma_bg_std,
+        sigma_ba_std,
+        bias_tau_s);
     cache.imu_intervals.reserve(imu.size() - 1);
     for (size_t i = 1; i < imu.size() && i < nominal_states.size(); ++i) {
+        if (i % 20000 == 0) {
+            std::fprintf(stderr, "[probe] BuildIntervalPropagationCache imu interval progress i=%zu\n", i);
+        }
         const ImuMeasurement& meas = imu[i];
         if (meas.dt <= 1.0e-9) {
             continue;
@@ -261,47 +275,35 @@ IntervalPropagationCache BuildIntervalPropagationCache(
         interval.mid_time = mid_time;
         interval.dt = meas.dt;
         interval.imu_index = i;
-        interval.start_state = start_state;
-        interval.mid_state = *mid_state_opt;
-        interval.end_state = end_state;
 
-        const Vector3d bg_mid = interval.mid_state.bg;
-        const Vector3d ba_mid = interval.mid_state.ba;
+        const NominalNavState& mid_state = *mid_state_opt;
+        const Vector3d bg_mid = mid_state.bg;
+        const Vector3d ba_mid = mid_state.ba;
         interval.omega_ib_b_nom = (meas.dtheta - bg_mid * meas.dt) / meas.dt;
-        interval.specific_force_b_nom = (meas.dvel - ba_mid * meas.dt) / meas.dt;
+        const Vector3d specific_force_b_nom = (meas.dvel - ba_mid * meas.dt) / meas.dt;
 
-        const Vector3d omega_ie_n = Earth::Iewn(interval.mid_state.blh.x());
-        const Vector3d omega_en_n = Earth::Wnen(interval.mid_state.blh, interval.mid_state.vel_ned);
-        const Vector3d gravity_n(0.0, 0.0, Earth::Gravity(interval.mid_state.blh));
+        const Vector3d omega_ie_n = Earth::Iewn(mid_state.blh.x());
+        const Vector3d omega_en_n = Earth::Wnen(mid_state.blh, mid_state.vel_ned);
+        const Vector3d gravity_n(0.0, 0.0, Earth::Gravity(mid_state.blh));
         interval.accel_n_mid =
-            interval.mid_state.q_nb.toRotationMatrix() * interval.specific_force_b_nom +
-            gravity_n - (2.0 * omega_ie_n + omega_en_n).cross(interval.mid_state.vel_ned);
-
-        const Matrix15d F = BuildF(
-            interval.mid_state.blh,
-            interval.mid_state.vel_ned,
-            interval.mid_state.q_nb,
-            interval.specific_force_b_nom,
-            bias_tau_s);
-        const Matrix15x12d G = BuildG(interval.mid_state.q_nb);
-        const Matrix12d Qc = BuildQc(
-            sigma_gyro_rps,
-            sigma_accel_mps2,
-            sigma_bg_std,
-            sigma_ba_std,
-            bias_tau_s);
-        DiscretizeLinearSystem(F, G, Qc, meas.dt, interval.phi, interval.q);
+            mid_state.q_nb.toRotationMatrix() * specific_force_b_nom +
+            gravity_n - (2.0 * omega_ie_n + omega_en_n).cross(mid_state.vel_ned);
 
         cache.imu_intervals.push_back(std::move(interval));
     }
+    std::fprintf(stderr, "[probe] BuildIntervalPropagationCache after imu interval build count=%zu\n",
+                 cache.imu_intervals.size());
 
     if (control_points.size() < 2 || cache.imu_intervals.empty()) {
-        return cache;
+        return;
     }
 
     cache.knot_intervals.resize(control_points.size() - 1);
     size_t imu_cursor = 0;
     for (size_t i = 0; i + 1 < control_points.size(); ++i) {
+        if (i % 200 == 0 || i + 130 >= control_points.size()) {
+            std::fprintf(stderr, "[probe] BuildIntervalPropagationCache knot interval progress i=%zu\n", i);
+        }
         KnotIntervalPropagation knot_interval;
         knot_interval.start_time = control_points[i].Timestamp();
         knot_interval.end_time = control_points[i + 1].Timestamp();
@@ -327,8 +329,34 @@ IntervalPropagationCache BuildIntervalPropagationCache(
                 break;
             }
 
-            phi_total = imu_interval.phi * phi_total;
-            q_total = imu_interval.phi * q_total * imu_interval.phi.transpose() + imu_interval.q;
+            const size_t imu_index = imu_interval.imu_index;
+            const ImuMeasurement& meas = imu[imu_index];
+            const NominalNavState& start_state = nominal_states[imu_index - 1];
+            const NominalNavState& end_state = nominal_states[imu_index];
+            const auto mid_state_opt = InterpolateNominalStateMid(
+                start_state,
+                end_state,
+                imu_interval.mid_time);
+            if (!mid_state_opt) {
+                break;
+            }
+
+            const NominalNavState& mid_state = *mid_state_opt;
+            const Vector3d specific_force_b_nom =
+                (meas.dvel - mid_state.ba * meas.dt) / meas.dt;
+            const Matrix15d F = BuildF(
+                mid_state.blh,
+                mid_state.vel_ned,
+                mid_state.q_nb,
+                specific_force_b_nom,
+                bias_tau_s);
+            const Matrix15x12d G = BuildG(mid_state.q_nb);
+            Matrix15d phi_step = Matrix15d::Identity();
+            Matrix15d q_step = Matrix15d::Zero();
+            DiscretizeLinearSystem(F, G, Qc, meas.dt, phi_step, q_step);
+
+            phi_total = phi_step * phi_total;
+            q_total = phi_step * q_total * phi_step.transpose() + q_step;
             has_step = true;
             ++local_cursor;
 
@@ -350,7 +378,10 @@ IntervalPropagationCache BuildIntervalPropagationCache(
         cache.knot_intervals[i] = std::move(knot_interval);
     }
 
-    return cache;
+    std::fprintf(stderr, "[probe] BuildIntervalPropagationCache after knot interval build count=%zu\n",
+                 cache.knot_intervals.size());
+
+    return;
 }
 
 std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(

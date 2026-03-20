@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -543,6 +544,8 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
     AlignedVec3Array new_delta_pos(new_control_points.size(), Vector3d::Zero());
     AlignedVec3Array new_delta_bg(new_control_points.size(), Vector3d::Zero());
     AlignedVec3Array new_delta_ba(new_control_points.size(), Vector3d::Zero());
+    std::fprintf(stderr, "[probe] ResetControlPointsFromNominalTrajectory after delta node allocation count=%zu\n",
+                 new_delta_theta.size());
     if (!reset_biases) {
         if (delta_theta_nodes_.size() == new_control_points.size() &&
             delta_vel_nodes_.size() == new_control_points.size() &&
@@ -567,15 +570,26 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
     delta_pos_nodes_ = std::move(new_delta_pos);
     delta_bg_nodes_ = std::move(new_delta_bg);
     delta_ba_nodes_ = std::move(new_delta_ba);
-    interval_cache_ = BuildIntervalPropagationCache(
-        imu_,
-        nominal_nav_,
-        control_points_,
-        config_.imu_sigma_gyro_rps,
-        config_.imu_sigma_accel_mps2,
-        config_.gyro_bias_rw_sigma,
-        config_.accel_bias_rw_sigma,
-        config_.bias_tau_s);
+    std::fprintf(stderr, "[probe] ResetControlPointsFromNominalTrajectory before BuildIntervalPropagationCache cp=%zu\n",
+                 control_points_.size());
+    try {
+        BuildIntervalPropagationCache(
+            imu_,
+            nominal_nav_,
+            control_points_,
+            config_.imu_sigma_gyro_rps,
+            config_.imu_sigma_accel_mps2,
+            config_.gyro_bias_rw_sigma,
+            config_.accel_bias_rw_sigma,
+            config_.bias_tau_s,
+            interval_cache_);
+    } catch (const std::exception& ex) {
+        LOG(ERROR) << "BuildIntervalPropagationCache failed: " << ex.what();
+        return false;
+    } catch (...) {
+        LOG(ERROR) << "BuildIntervalPropagationCache failed with unknown exception";
+        return false;
+    }
     std::fprintf(stderr, "[probe] ResetControlPointsFromNominalTrajectory after BuildIntervalPropagationCache knot_count=%zu imu_interval_count=%zu\n",
                  interval_cache_.knot_intervals.size(), interval_cache_.imu_intervals.size());
     return !control_points_.empty();
@@ -881,7 +895,8 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
 
     double max_delta_bg_norm = 0.0;
     double max_delta_ba_norm = 0.0;
-    if (control_points_.size() == delta_bg_nodes_.size() &&
+    if (!control_points_.empty() &&
+        control_points_.size() == delta_bg_nodes_.size() &&
         control_points_.size() == delta_ba_nodes_.size()) {
         for (size_t i = 0; i < control_points_.size(); ++i) {
             full_bg_nodes.push_back(initial_alignment_.bg0 + delta_bg_nodes_[i]);
@@ -908,7 +923,8 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
     std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases after PropagateNominalTrajectory nominal=%zu\n",
                  nominal_nav_.size());
 
-    if (control_points_.size() == delta_bg_nodes_.size() &&
+    if (!control_points_.empty() &&
+        control_points_.size() == delta_bg_nodes_.size() &&
         control_points_.size() == delta_ba_nodes_.size()) {
         LOG(INFO) << "Closed-loop bias feedback injected into nominal mechanization, max |delta_bg|="
                   << max_delta_bg_norm << " rad/s, max |delta_ba|=" << max_delta_ba_norm << " m/s^2";
@@ -921,15 +937,24 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
     }
 
     if (control_points_.size() >= 2) {
-        interval_cache_ = BuildIntervalPropagationCache(
-            imu_,
-            nominal_nav_,
-            control_points_,
-            config_.imu_sigma_gyro_rps,
-            config_.imu_sigma_accel_mps2,
-            config_.gyro_bias_rw_sigma,
-            config_.accel_bias_rw_sigma,
-            config_.bias_tau_s);
+        try {
+            BuildIntervalPropagationCache(
+                imu_,
+                nominal_nav_,
+                control_points_,
+                config_.imu_sigma_gyro_rps,
+                config_.imu_sigma_accel_mps2,
+                config_.gyro_bias_rw_sigma,
+                config_.accel_bias_rw_sigma,
+                config_.bias_tau_s,
+                interval_cache_);
+        } catch (const std::exception& ex) {
+            LOG(ERROR) << "BuildIntervalPropagationCache failed: " << ex.what();
+            interval_cache_ = IntervalPropagationCache();
+        } catch (...) {
+            LOG(ERROR) << "BuildIntervalPropagationCache failed with unknown exception";
+            interval_cache_ = IntervalPropagationCache();
+        }
         std::fprintf(stderr, "[probe] UpdateNominalTrajectoryFromCurrentBiases after BuildIntervalPropagationCache knot=%zu imu_intervals=%zu\n",
                      interval_cache_.knot_intervals.size(), interval_cache_.imu_intervals.size());
     } else {
