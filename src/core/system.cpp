@@ -596,17 +596,29 @@ bool System::BuildAndSolveProblem() {
                 continue;
             }
             const auto nominal_accel = EvaluateNominalAccelAtTime(control_points_[i].Timestamp());
-            if (!nominal_accel) {
+            const auto nominal_state = EvaluateNominalState(nominal_nav_, control_points_[i].Timestamp());
+            if (!nominal_accel || !nominal_state) {
                 continue;
             }
-            const double sigma_theta = std::max(1.0e-6, config_.imu_sigma_gyro_rps * std::sqrt(dt));
-            const double sigma_v = std::max(1.0e-6, config_.imu_sigma_accel_mps2 * std::sqrt(dt));
-            const double sigma_p = std::max(1.0e-6, sigma_v * dt);
-            const double sigma_bg = std::max(1.0e-6, config_.gyro_bias_rw_sigma * std::sqrt(dt));
-            const double sigma_ba = std::max(1.0e-6, config_.accel_bias_rw_sigma * std::sqrt(dt));
+            const Vector3d omega_ie_n = Earth::Iewn(nominal_state->blh.x());
+            const Vector3d omega_en_n = Earth::Wnen(nominal_state->blh, nominal_state->vel_ned);
+            const Vector3d gravity_n(0.0, 0.0, Earth::Gravity(nominal_state->blh));
+            const Vector3d specific_force_n =
+                *nominal_accel - gravity_n + (2.0 * omega_ie_n + omega_en_n).cross(nominal_state->vel_ned);
+            const Vector3d specific_force_b =
+                nominal_state->q_nb.toRotationMatrix().transpose() * specific_force_n;
             problem.AddResidualBlock(
                 factors::ErrorStateProcessFactor::Create(
-                    dt, *nominal_accel, sigma_theta, sigma_v, sigma_p, sigma_bg, sigma_ba),
+                    dt,
+                    nominal_state->blh,
+                    nominal_state->vel_ned,
+                    nominal_state->q_nb,
+                    specific_force_b,
+                    config_.imu_sigma_gyro_rps,
+                    config_.imu_sigma_accel_mps2,
+                    config_.gyro_bias_rw_sigma,
+                    config_.accel_bias_rw_sigma,
+                    config_.bias_tau_s),
                 nullptr,
                 delta_theta_nodes_[i].data(),
                 delta_vel_nodes_[i].data(),
