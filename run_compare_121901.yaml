@@ -39,7 +39,7 @@ initial_yaw_feedback:
   window_s: 20.0
   min_speed_mps: 0.5
   min_pairs: 10
-  max_abs_deg: 45.0
+  max_abs_deg: 90.0
 use_gnss_factors: true
 use_imu_factors: true
 imu_stride: 10
