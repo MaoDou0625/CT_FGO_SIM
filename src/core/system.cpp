@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <thread>
 
 namespace ct_fgo_sim {
@@ -49,6 +50,111 @@ double WrapAngleRad(double angle_rad) {
 double YawFromQuaternionNed(const Eigen::Quaterniond& q_nb) {
     const Eigen::Matrix3d rot = q_nb.toRotationMatrix();
     return std::atan2(rot(1, 0), rot(0, 0));
+}
+
+struct YawFeedbackSample {
+    double time = 0.0;
+    double speed_mps = 0.0;
+    double yaw_error_rad = 0.0;
+};
+
+double CircularMeanRad(const std::vector<YawFeedbackSample>& samples, size_t begin, size_t end) {
+    double weighted_sin = 0.0;
+    double weighted_cos = 0.0;
+    for (size_t i = begin; i < end; ++i) {
+        const double weight = std::clamp(samples[i].speed_mps, 0.5, 5.0);
+        weighted_sin += weight * std::sin(samples[i].yaw_error_rad);
+        weighted_cos += weight * std::cos(samples[i].yaw_error_rad);
+    }
+    return std::atan2(weighted_sin, weighted_cos);
+}
+
+std::vector<double> AlignAnglesAroundSeed(
+    const std::vector<YawFeedbackSample>& samples,
+    size_t begin,
+    size_t end,
+    double seed_rad) {
+    std::vector<double> aligned;
+    aligned.reserve(end - begin);
+    for (size_t i = begin; i < end; ++i) {
+        aligned.push_back(seed_rad + WrapAngleRad(samples[i].yaw_error_rad - seed_rad));
+    }
+    return aligned;
+}
+
+double MedianOfVector(std::vector<double> values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    const size_t mid = values.size() / 2;
+    std::nth_element(values.begin(), values.begin() + mid, values.end());
+    double median = values[mid];
+    if (values.size() % 2 == 0) {
+        std::nth_element(values.begin(), values.begin() + mid - 1, values.end());
+        median = 0.5 * (median + values[mid - 1]);
+    }
+    return median;
+}
+
+double WeightedMedian(std::vector<std::pair<double, double>> value_weight_pairs) {
+    if (value_weight_pairs.empty()) {
+        return 0.0;
+    }
+    std::sort(
+        value_weight_pairs.begin(),
+        value_weight_pairs.end(),
+        [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+    double total_weight = 0.0;
+    for (const auto& value_weight : value_weight_pairs) {
+        total_weight += std::max(0.0, value_weight.second);
+    }
+    if (total_weight <= 0.0) {
+        return value_weight_pairs[value_weight_pairs.size() / 2].first;
+    }
+    double cumulative_weight = 0.0;
+    for (const auto& value_weight : value_weight_pairs) {
+        cumulative_weight += std::max(0.0, value_weight.second);
+        if (cumulative_weight >= 0.5 * total_weight) {
+            return value_weight.first;
+        }
+    }
+    return value_weight_pairs.back().first;
+}
+
+double MedianAbsoluteDeviation(const std::vector<double>& values, double median) {
+    std::vector<double> absolute_deviations;
+    absolute_deviations.reserve(values.size());
+    for (const double value : values) {
+        absolute_deviations.push_back(std::abs(value - median));
+    }
+    return MedianOfVector(std::move(absolute_deviations));
+}
+
+double LinearSlope(const std::vector<YawFeedbackSample>& samples, size_t begin, size_t end, const std::vector<double>& values) {
+    if (end <= begin + 1 || values.size() != end - begin) {
+        return 0.0;
+    }
+    double mean_time = 0.0;
+    double mean_value = 0.0;
+    for (size_t i = begin; i < end; ++i) {
+        mean_time += samples[i].time;
+        mean_value += values[i - begin];
+    }
+    const double inv_count = 1.0 / static_cast<double>(end - begin);
+    mean_time *= inv_count;
+    mean_value *= inv_count;
+
+    double covariance = 0.0;
+    double variance = 0.0;
+    for (size_t i = begin; i < end; ++i) {
+        const double dt = samples[i].time - mean_time;
+        covariance += dt * (values[i - begin] - mean_value);
+        variance += dt * dt;
+    }
+    if (variance <= 1.0e-12) {
+        return 0.0;
+    }
+    return covariance / variance;
 }
 
 spline::ControlPointArray BuildKnotGridFromNominal(
@@ -694,9 +800,8 @@ bool System::ApplyInitialYawFeedbackFromGnss() {
     }
 
     const double window_end_time = initial_alignment_.reference_time + config_.initial_yaw_feedback_window_s;
-    double weighted_sin = 0.0;
-    double weighted_cos = 0.0;
-    int pair_count = 0;
+    std::vector<YawFeedbackSample> samples;
+    samples.reserve(gnss_.size());
 
     for (size_t i = 1; i < gnss_.size(); ++i) {
         const double dt = gnss_[i].time - gnss_[i - 1].time;
@@ -726,19 +831,127 @@ bool System::ApplyInitialYawFeedbackFromGnss() {
         const Eigen::Quaterniond q_nb(Eigen::Matrix3d(composed->full_pose.so3().matrix()));
         const double ct_yaw = YawFromQuaternionNed(q_nb);
         const double yaw_error = WrapAngleRad(rtk_yaw - ct_yaw);
-        const double weight = std::min(horizontal_speed, 10.0);
-        weighted_sin += weight * std::sin(yaw_error);
-        weighted_cos += weight * std::cos(yaw_error);
-        ++pair_count;
+        samples.push_back(YawFeedbackSample{mid_time, horizontal_speed, yaw_error});
     }
 
-    if (pair_count < config_.initial_yaw_feedback_min_pairs) {
-        LOG(INFO) << "Skipping initial yaw feedback: only " << pair_count
+    if (static_cast<int>(samples.size()) < config_.initial_yaw_feedback_min_pairs) {
+        LOG(INFO) << "Skipping initial yaw feedback: only " << samples.size()
                   << " RTK heading pairs in the start window";
         return false;
     }
 
-    double yaw_correction = std::atan2(weighted_sin, weighted_cos);
+    const size_t window_size = std::min(
+        samples.size(),
+        static_cast<size_t>(std::max(config_.initial_yaw_feedback_min_pairs, 8)));
+    const double kMaxSampleGapS = 0.75;
+    const double kStartupSkipS = 4.0;
+    size_t best_begin = 0;
+    size_t best_end = window_size;
+    double best_score = std::numeric_limits<double>::infinity();
+    double best_center = 0.0;
+    double best_mad = std::numeric_limits<double>::infinity();
+
+    size_t first_candidate_begin = 0;
+    while (first_candidate_begin < samples.size() &&
+           samples[first_candidate_begin].time < samples.front().time + kStartupSkipS) {
+        ++first_candidate_begin;
+    }
+    if (first_candidate_begin + window_size > samples.size()) {
+        first_candidate_begin = 0;
+    }
+
+    for (size_t begin = first_candidate_begin; begin + window_size <= samples.size(); ++begin) {
+        const size_t end = begin + window_size;
+        bool has_large_gap = false;
+        for (size_t i = begin + 1; i < end; ++i) {
+            if (samples[i].time - samples[i - 1].time > kMaxSampleGapS) {
+                has_large_gap = true;
+                break;
+            }
+        }
+        if (has_large_gap) {
+            continue;
+        }
+
+        const double seed = CircularMeanRad(samples, begin, end);
+        const std::vector<double> aligned = AlignAnglesAroundSeed(samples, begin, end, seed);
+        const double center = MedianOfVector(aligned);
+        const double mad = MedianAbsoluteDeviation(aligned, center);
+        const double slope = LinearSlope(samples, begin, end, aligned);
+        double mean_speed = 0.0;
+        for (size_t i = begin; i < end; ++i) {
+            mean_speed += samples[i].speed_mps;
+        }
+        mean_speed /= static_cast<double>(end - begin);
+
+        const double score =
+            4.0 * mad +
+            1.5 * std::abs(slope) -
+            0.05 * mean_speed +
+            1.0e-4 * (samples[begin].time - initial_alignment_.reference_time);
+        if (score < best_score) {
+            best_score = score;
+            best_begin = begin;
+            best_end = end;
+            best_center = center;
+            best_mad = mad;
+        }
+    }
+
+    if (!std::isfinite(best_score)) {
+        LOG(INFO) << "Skipping initial yaw feedback: no contiguous RTK heading segment found";
+        return false;
+    }
+
+    const double robust_gate = std::max(10.0 * kDegToRad, 3.0 * std::max(best_mad, 1.0 * kDegToRad));
+    while (best_begin > 0) {
+        const size_t candidate = best_begin - 1;
+        if (samples[best_begin].time - samples[candidate].time > kMaxSampleGapS) {
+            break;
+        }
+        const double aligned_error = best_center + WrapAngleRad(samples[candidate].yaw_error_rad - best_center);
+        if (std::abs(aligned_error - best_center) > robust_gate) {
+            break;
+        }
+        best_begin = candidate;
+    }
+    while (best_end < samples.size()) {
+        if (samples[best_end].time - samples[best_end - 1].time > kMaxSampleGapS) {
+            break;
+        }
+        const double aligned_error = best_center + WrapAngleRad(samples[best_end].yaw_error_rad - best_center);
+        if (std::abs(aligned_error - best_center) > robust_gate) {
+            break;
+        }
+        ++best_end;
+    }
+
+    const double refined_seed = CircularMeanRad(samples, best_begin, best_end);
+    const std::vector<double> refined_aligned = AlignAnglesAroundSeed(samples, best_begin, best_end, refined_seed);
+    const double refined_center = MedianOfVector(refined_aligned);
+    const double refined_mad = MedianAbsoluteDeviation(refined_aligned, refined_center);
+    const double refined_gate = std::max(8.0 * kDegToRad, 2.5 * std::max(refined_mad, 1.0 * kDegToRad));
+    std::vector<std::pair<double, double>> inlier_value_weights;
+    inlier_value_weights.reserve(best_end - best_begin);
+    for (size_t i = best_begin; i < best_end; ++i) {
+        const double aligned_error = refined_center + WrapAngleRad(samples[i].yaw_error_rad - refined_center);
+        if (std::abs(aligned_error - refined_center) > refined_gate) {
+            continue;
+        }
+        inlier_value_weights.emplace_back(
+            aligned_error,
+            std::clamp(samples[i].speed_mps, config_.initial_yaw_feedback_min_speed_mps, 5.0));
+    }
+
+    if (static_cast<int>(inlier_value_weights.size()) < config_.initial_yaw_feedback_min_pairs) {
+        LOG(INFO) << "Skipping initial yaw feedback: robust inlier count only "
+                  << inlier_value_weights.size();
+        return false;
+    }
+
+    const size_t robust_inlier_count = inlier_value_weights.size();
+    double yaw_correction = WeightedMedian(std::move(inlier_value_weights));
+    yaw_correction = WrapAngleRad(yaw_correction);
     yaw_correction = std::clamp(
         yaw_correction,
         -config_.initial_yaw_feedback_max_abs_rad,
@@ -757,7 +970,9 @@ bool System::ApplyInitialYawFeedbackFromGnss() {
 
     LOG(INFO) << "Injected initial yaw feedback from RTK heading, correction = "
               << yaw_correction << " rad (" << yaw_correction / kDegToRad << " deg)"
-              << ", pair_count = " << pair_count;
+              << ", raw_pair_count = " << samples.size()
+              << ", selected_pair_count = " << (best_end - best_begin)
+              << ", robust_inlier_count = " << robust_inlier_count;
 
     UpdateNominalTrajectoryFromCurrentBiases();
     return true;
