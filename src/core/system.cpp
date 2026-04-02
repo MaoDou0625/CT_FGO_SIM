@@ -226,14 +226,6 @@ int FindNodeIntervalStart(const spline::ControlPointArray& control_points, doubl
     return std::max(0, static_cast<int>(std::distance(control_points.begin(), upper)) - 1);
 }
 
-Eigen::Matrix3d BuildGnssSqrtInfo(double sigma_horizontal_m, double sigma_vertical_m) {
-    Eigen::Matrix3d sqrt_info = Eigen::Matrix3d::Zero();
-    sqrt_info(0, 0) = 1.0 / std::max(1.0e-6, sigma_horizontal_m);
-    sqrt_info(1, 1) = 1.0 / std::max(1.0e-6, sigma_horizontal_m);
-    sqrt_info(2, 2) = 1.0 / std::max(1.0e-6, sigma_vertical_m);
-    return sqrt_info;
-}
-
 Vector3d InterpolateNodeValue(
     double time,
     const spline::ControlPointArray& control_points,
@@ -321,6 +313,9 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     }
     if (cfg["gnss_sigma_vertical_m"]) {
         config_.gnss_sigma_vertical_m = cfg["gnss_sigma_vertical_m"].as<double>();
+    }
+    if (cfg["gnss_vertical_cauchy_scale_m"]) {
+        config_.gnss_vertical_cauchy_scale_m = cfg["gnss_vertical_cauchy_scale_m"].as<double>();
     }
     if (cfg["imu_sigma_accel_mps2"]) {
         config_.imu_sigma_accel_mps2 = cfg["imu_sigma_accel_mps2"].as<double>();
@@ -553,6 +548,7 @@ void System::Describe() const {
     LOG(INFO) << "Spline dt: " << config_.spline_dt_s;
     LOG(INFO) << "Time window: [" << config_.start_time << ", " << config_.end_time << "]";
     LOG(INFO) << "GNSS sigma(h/v): " << config_.gnss_sigma_horizontal_m << ", " << config_.gnss_sigma_vertical_m;
+    LOG(INFO) << "GNSS vertical Cauchy scale (m): " << config_.gnss_vertical_cauchy_scale_m;
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
     LOG(INFO) << "IMU stride: " << config_.imu_stride;
     LOG(INFO) << "Outer iterations: " << config_.outer_iterations;
@@ -723,9 +719,8 @@ bool System::BuildAndSolveProblem() {
         nullptr,
         q_body_imu_.coeffs().data());
 
-    const Eigen::Matrix3d gnss_sqrt_info =
-        BuildGnssSqrtInfo(config_.gnss_sigma_horizontal_m, config_.gnss_sigma_vertical_m);
-    int gnss_factor_count = 0;
+    int gnss_horizontal_factor_count = 0;
+    int gnss_vertical_factor_count = 0;
     if (config_.use_gnss_factors) {
         for (const auto& gnss : gnss_) {
             const int start = FindNodeIntervalStart(control_points_, gnss.time);
@@ -742,15 +737,43 @@ bool System::BuildAndSolveProblem() {
             }
             const double u = std::clamp((gnss.time - control_points_[start].Timestamp()) / dt, 0.0, 1.0);
             const Vector3d nominal_pos_ned = Earth::GlobalToLocal(origin_blh_, nominal_state->blh);
-            const Vector3d local_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
-            ceres::CostFunction* cost = factors::ErrorStateGnssFactor::Create(
-                u, nominal_pos_ned, local_ned, gnss_sqrt_info);
+            const Vector3d meas_pos_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
+
             problem.AddResidualBlock(
-                cost,
+                factors::ErrorStateGnssHorizontalLeverArmFactor::Create(
+                    u,
+                    nominal_pos_ned,
+                    nominal_state->q_nb,
+                    lever_arm_,
+                    meas_pos_ned,
+                    config_.gnss_sigma_horizontal_m),
                 nullptr,
                 delta_pos_nodes_[start].data(),
-                delta_pos_nodes_[start + 1].data());
-            ++gnss_factor_count;
+                delta_pos_nodes_[start + 1].data(),
+                delta_theta_nodes_[start].data(),
+                delta_theta_nodes_[start + 1].data());
+            ++gnss_horizontal_factor_count;
+
+            ceres::LossFunction* vertical_loss = nullptr;
+            if (config_.gnss_vertical_cauchy_scale_m > 0.0) {
+                const double whitened_scale =
+                    config_.gnss_vertical_cauchy_scale_m / std::max(1.0e-6, config_.gnss_sigma_vertical_m);
+                vertical_loss = new ceres::CauchyLoss(whitened_scale);
+            }
+            problem.AddResidualBlock(
+                factors::ErrorStateGnssVerticalLeverArmFactor::Create(
+                    u,
+                    nominal_pos_ned,
+                    nominal_state->q_nb,
+                    lever_arm_,
+                    meas_pos_ned,
+                    config_.gnss_sigma_vertical_m),
+                vertical_loss,
+                delta_pos_nodes_[start].data(),
+                delta_pos_nodes_[start + 1].data(),
+                delta_theta_nodes_[start].data(),
+                delta_theta_nodes_[start + 1].data());
+            ++gnss_vertical_factor_count;
         }
     }
 
@@ -793,7 +816,8 @@ bool System::BuildAndSolveProblem() {
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
 
-    LOG(INFO) << "GNSS factors: " << gnss_factor_count;
+    LOG(INFO) << "GNSS factors (horizontal / vertical): "
+              << gnss_horizontal_factor_count << " / " << gnss_vertical_factor_count;
     LOG(INFO) << "Interval propagation factors: " << process_factor_count;
     LOG(INFO) << summary.BriefReport();
     return summary.termination_type != ceres::FAILURE;

@@ -47,7 +47,8 @@ struct AppConfig {
     double end_time = 0.0;
     double align_time_s = 30.0;
     double gnss_sigma_horizontal_m = 0.03;
-    double gnss_sigma_vertical_m = 0.05;
+    double gnss_sigma_vertical_m = 0.20;
+    double gnss_vertical_cauchy_scale_m = 0.12;
     double imu_sigma_accel_mps2 = 0.2;
     double imu_sigma_gyro_rps = 0.01;
     double gyro_bias_rw_sigma = 1.0e-4;
