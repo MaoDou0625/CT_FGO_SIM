@@ -55,6 +55,10 @@ struct AppConfig {
     double vertical_gnss_cauchy_scale_m = 0.0;
     double vertical_smooth_sigma_m = 0.02;
     double vertical_prior_sigma_m = 0.01;
+    bool enable_road_profile_state = false;
+    double road_profile_ds_m = 0.25;
+    double road_profile_prior_sigma_m = 0.01;
+    double road_profile_anchor_sigma_m = 0.05;
     double imu_sigma_accel_mps2 = 0.2;
     double imu_sigma_gyro_rps = 0.01;
     double gyro_bias_rw_sigma = 1.0e-4;
@@ -118,6 +122,7 @@ private:
     bool SaveOutputs() const;
     bool ApplyInitialYawFeedbackFromGnss();
     bool InjectCurrentErrorStateIntoNominalTrajectory();
+    void ResetRoadProfileNodesFromNominalTrajectory();
     std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
     std::optional<Vector3d> EvaluateNominalAccelAtTime(double time) const;
     std::optional<Vector3d> EvaluateNodeValueAtTime(
@@ -148,6 +153,9 @@ private:
     StaticAlignmentResult initial_alignment_;
     NominalNavStates nominal_nav_;
     IntervalPropagationCache interval_cache_;
+    std::vector<double> nominal_distance_s_;
+    std::vector<double> road_profile_s_nodes_;
+    std::vector<double> road_profile_h_nodes_;
     bool initial_yaw_feedback_applied_ = false;
     double initial_yaw_feedback_total_rad_ = 0.0;
 };

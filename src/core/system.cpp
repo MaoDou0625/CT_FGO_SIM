@@ -293,6 +293,51 @@ Vector3d NedToEnu(const Vector3d& ned) {
     return Earth::NedToEnu(ned);
 }
 
+std::vector<double> BuildNominalDistanceAxis(
+    const NominalNavStates& nominal_nav,
+    const Vector3d& origin_blh) {
+    std::vector<double> s_axis;
+    if (nominal_nav.empty()) {
+        return s_axis;
+    }
+    s_axis.resize(nominal_nav.size(), 0.0);
+    if (nominal_nav.size() == 1) {
+        return s_axis;
+    }
+    Vector3d prev_local_ned = Earth::GlobalToLocal(origin_blh, nominal_nav.front().blh);
+    for (size_t i = 1; i < nominal_nav.size(); ++i) {
+        const Vector3d local_ned = Earth::GlobalToLocal(origin_blh, nominal_nav[i].blh);
+        const Eigen::Vector2d dn = (local_ned - prev_local_ned).head<2>();
+        s_axis[i] = s_axis[i - 1] + dn.norm();
+        prev_local_ned = local_ned;
+    }
+    return s_axis;
+}
+
+double InterpolateScalarSeries(
+    double x,
+    const std::vector<double>& x_axis,
+    const std::vector<double>& y_axis) {
+    if (x_axis.empty() || y_axis.empty() || x_axis.size() != y_axis.size()) {
+        return 0.0;
+    }
+    if (x <= x_axis.front()) {
+        return y_axis.front();
+    }
+    if (x >= x_axis.back()) {
+        return y_axis.back();
+    }
+    const auto upper = std::lower_bound(x_axis.begin(), x_axis.end(), x);
+    const size_t j = static_cast<size_t>(std::distance(x_axis.begin(), upper));
+    const size_t i = j - 1;
+    const double dx = x_axis[j] - x_axis[i];
+    if (dx <= 1.0e-12) {
+        return y_axis[i];
+    }
+    const double u = std::clamp((x - x_axis[i]) / dx, 0.0, 1.0);
+    return y_axis[i] * (1.0 - u) + y_axis[j] * u;
+}
+
 Eigen::Quaterniond QnbNedToQebEnu(const Eigen::Quaterniond& q_nb_ned) {
     return Eigen::Quaterniond(Earth::RenuNed() * q_nb_ned.toRotationMatrix()).normalized();
 }
@@ -365,6 +410,18 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     }
     if (cfg["vertical_prior_sigma_m"]) {
         config_.vertical_prior_sigma_m = cfg["vertical_prior_sigma_m"].as<double>();
+    }
+    if (cfg["enable_road_profile_state"]) {
+        config_.enable_road_profile_state = cfg["enable_road_profile_state"].as<bool>();
+    }
+    if (cfg["road_profile_ds_m"]) {
+        config_.road_profile_ds_m = cfg["road_profile_ds_m"].as<double>();
+    }
+    if (cfg["road_profile_prior_sigma_m"]) {
+        config_.road_profile_prior_sigma_m = cfg["road_profile_prior_sigma_m"].as<double>();
+    }
+    if (cfg["road_profile_anchor_sigma_m"]) {
+        config_.road_profile_anchor_sigma_m = cfg["road_profile_anchor_sigma_m"].as<double>();
     }
     if (cfg["imu_sigma_accel_mps2"]) {
         config_.imu_sigma_accel_mps2 = cfg["imu_sigma_accel_mps2"].as<double>();
@@ -619,6 +676,10 @@ void System::Describe() const {
     LOG(INFO) << "Vertical GNSS Cauchy scale (m): " << config_.vertical_gnss_cauchy_scale_m;
     LOG(INFO) << "Vertical smooth sigma (m): " << config_.vertical_smooth_sigma_m;
     LOG(INFO) << "Vertical prior sigma (m): " << config_.vertical_prior_sigma_m;
+    LOG(INFO) << "Enable road profile state: " << (config_.enable_road_profile_state ? "true" : "false");
+    LOG(INFO) << "Road profile ds (m): " << config_.road_profile_ds_m;
+    LOG(INFO) << "Road profile prior sigma (m): " << config_.road_profile_prior_sigma_m;
+    LOG(INFO) << "Road profile anchor sigma (m): " << config_.road_profile_anchor_sigma_m;
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
     LOG(INFO) << "IMU stride: " << config_.imu_stride;
     LOG(INFO) << "Outer iterations: " << config_.outer_iterations;
@@ -743,6 +804,8 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
     delta_bg_nodes_ = std::move(new_delta_bg);
     delta_ba_nodes_ = std::move(new_delta_ba);
     delta_z_nodes_ = std::move(new_delta_z);
+    nominal_distance_s_ = BuildNominalDistanceAxis(nominal_nav_, origin_blh_);
+    ResetRoadProfileNodesFromNominalTrajectory();
     try {
         BuildIntervalPropagationCache(
             imu_,
@@ -1609,6 +1672,35 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory() {
     return true;
 }
 
+void System::ResetRoadProfileNodesFromNominalTrajectory() {
+    road_profile_s_nodes_.clear();
+    road_profile_h_nodes_.clear();
+    if (!config_.enable_road_profile_state || nominal_nav_.empty()) {
+        return;
+    }
+    if (nominal_distance_s_.size() != nominal_nav_.size()) {
+        nominal_distance_s_ = BuildNominalDistanceAxis(nominal_nav_, origin_blh_);
+    }
+    if (nominal_distance_s_.empty()) {
+        return;
+    }
+
+    std::vector<double> nominal_h_ned;
+    nominal_h_ned.reserve(nominal_nav_.size());
+    for (const auto& nav : nominal_nav_) {
+        nominal_h_ned.push_back(Earth::GlobalToLocal(origin_blh_, nav.blh).z());
+    }
+
+    const double ds = std::max(0.05, config_.road_profile_ds_m);
+    const double s_end = nominal_distance_s_.back();
+    for (double s = 0.0; s < s_end - 1.0e-9; s += ds) {
+        road_profile_s_nodes_.push_back(s);
+        road_profile_h_nodes_.push_back(InterpolateScalarSeries(s, nominal_distance_s_, nominal_h_ned));
+    }
+    road_profile_s_nodes_.push_back(s_end);
+    road_profile_h_nodes_.push_back(nominal_h_ned.back());
+}
+
 void System::UpdateNominalTrajectoryFromCurrentBiases() {
     std::vector<double> bias_times;
     bias_times.reserve(control_points_.size());
@@ -1737,6 +1829,16 @@ bool System::SaveOutputs() const {
         }
     }
 
+    if (config_.enable_road_profile_state && !road_profile_s_nodes_.empty() &&
+        road_profile_s_nodes_.size() == road_profile_h_nodes_.size()) {
+        const std::filesystem::path road_profile_path = config_.output_path / "road_profile_nodes.txt";
+        std::ofstream road_profile_ofs(road_profile_path);
+        road_profile_ofs << "# s_m h_ned_m\n";
+        for (size_t i = 0; i < road_profile_s_nodes_.size(); ++i) {
+            road_profile_ofs << road_profile_s_nodes_[i] << ' ' << road_profile_h_nodes_[i] << '\n';
+        }
+    }
+
     const std::filesystem::path summary_path = config_.output_path / "run_summary.txt";
     std::ofstream summary_ofs(summary_path);
     summary_ofs << std::setprecision(17);
@@ -1749,10 +1851,15 @@ bool System::SaveOutputs() const {
     summary_ofs << "vertical_gnss_cauchy_scale_m: " << config_.vertical_gnss_cauchy_scale_m << '\n';
     summary_ofs << "vertical_smooth_sigma_m: " << config_.vertical_smooth_sigma_m << '\n';
     summary_ofs << "vertical_prior_sigma_m: " << config_.vertical_prior_sigma_m << '\n';
+    summary_ofs << "enable_road_profile_state: " << config_.enable_road_profile_state << '\n';
+    summary_ofs << "road_profile_ds_m: " << config_.road_profile_ds_m << '\n';
+    summary_ofs << "road_profile_prior_sigma_m: " << config_.road_profile_prior_sigma_m << '\n';
+    summary_ofs << "road_profile_anchor_sigma_m: " << config_.road_profile_anchor_sigma_m << '\n';
     summary_ofs << "output_query_dt_s: " << config_.output_query_dt_s << '\n';
     summary_ofs << "gnss_count: " << gnss_.size() << '\n';
     summary_ofs << "imu_count: " << imu_.size() << '\n';
     summary_ofs << "control_point_count: " << control_points_.size() << '\n';
+    summary_ofs << "road_profile_node_count: " << road_profile_s_nodes_.size() << '\n';
     summary_ofs << "outer_iterations: " << config_.outer_iterations << '\n';
     summary_ofs << "enable_initial_yaw_feedback: " << config_.enable_initial_yaw_feedback << '\n';
     summary_ofs << "initial_yaw_feedback_applied: " << initial_yaw_feedback_applied_ << '\n';
