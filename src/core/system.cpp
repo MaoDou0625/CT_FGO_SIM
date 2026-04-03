@@ -7,6 +7,7 @@
 #include "ct_fgo_sim/factors/error_state_interval_factor.h"
 #include "ct_fgo_sim/factors/error_state_nhc_factor.h"
 #include "ct_fgo_sim/factors/quaternion_prior_factor.h"
+#include "ct_fgo_sim/factors/road_profile_factor.h"
 #include "ct_fgo_sim/factors/vertical_profile_factor.h"
 #include "ct_fgo_sim/io/text_measurement_io.h"
 
@@ -336,6 +337,38 @@ double InterpolateScalarSeries(
     }
     const double u = std::clamp((x - x_axis[i]) / dx, 0.0, 1.0);
     return y_axis[i] * (1.0 - u) + y_axis[j] * u;
+}
+
+bool FindScalarSeriesInterval(
+    double x,
+    const std::vector<double>& x_axis,
+    int& start,
+    double& u) {
+    start = -1;
+    u = 0.0;
+    if (x_axis.size() < 2) {
+        return false;
+    }
+    if (x <= x_axis.front()) {
+        start = 0;
+        u = 0.0;
+        return true;
+    }
+    if (x >= x_axis.back()) {
+        start = static_cast<int>(x_axis.size()) - 2;
+        u = 1.0;
+        return true;
+    }
+    const auto upper = std::lower_bound(x_axis.begin(), x_axis.end(), x);
+    const int j = static_cast<int>(std::distance(x_axis.begin(), upper));
+    const int i = j - 1;
+    const double dx = x_axis[j] - x_axis[i];
+    if (dx <= 1.0e-12) {
+        return false;
+    }
+    start = i;
+    u = std::clamp((x - x_axis[i]) / dx, 0.0, 1.0);
+    return true;
 }
 
 Eigen::Quaterniond QnbNedToQebEnu(const Eigen::Quaterniond& q_nb_ned) {
@@ -1027,6 +1060,59 @@ bool System::BuildAndSolveProblem() {
             bias_rw_factor_count += 2;
         }
 
+        int road_profile_gnss_factor_count = 0;
+        int road_profile_smoothness_factor_count = 0;
+        int road_profile_anchor_factor_count = 0;
+        if (config_.enable_road_profile_state && road_profile_h_nodes_.size() >= 2 &&
+            road_profile_h_nodes_.size() == road_profile_s_nodes_.size() &&
+            !nominal_nav_.empty() && nominal_distance_s_.size() == nominal_nav_.size()) {
+            std::vector<double> nav_times;
+            nav_times.reserve(nominal_nav_.size());
+            for (const auto& nav : nominal_nav_) {
+                nav_times.push_back(nav.time);
+            }
+
+            for (auto& road_h : road_profile_h_nodes_) {
+                problem.AddParameterBlock(&road_h, 1);
+            }
+            problem.SetParameterBlockConstant(&road_profile_h_nodes_.front());
+
+            const double profile_sigma = config_.vertical_gnss_sigma_m > 0.0
+                ? config_.vertical_gnss_sigma_m
+                : config_.gnss_sigma_vertical_m;
+            for (const auto& gnss : gnss_) {
+                const double s_query = InterpolateScalarSeries(gnss.time, nav_times, nominal_distance_s_);
+                int start = -1;
+                double u = 0.0;
+                if (!FindScalarSeriesInterval(s_query, road_profile_s_nodes_, start, u)) {
+                    continue;
+                }
+                const Vector3d meas_pos_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
+                problem.AddResidualBlock(
+                    factors::RoadProfileGnssFactor::Create(u, meas_pos_ned.z(), profile_sigma),
+                    nullptr,
+                    &road_profile_h_nodes_[start],
+                    &road_profile_h_nodes_[start + 1]);
+                ++road_profile_gnss_factor_count;
+            }
+            for (int i = 0; i + 1 < static_cast<int>(road_profile_h_nodes_.size()); ++i) {
+                problem.AddResidualBlock(
+                    factors::RoadProfileSmoothnessFactor::Create(config_.road_profile_prior_sigma_m),
+                    nullptr,
+                    &road_profile_h_nodes_[i],
+                    &road_profile_h_nodes_[i + 1]);
+                ++road_profile_smoothness_factor_count;
+            }
+            for (size_t i = 1; i < road_profile_h_nodes_.size(); ++i) {
+                const double ref_h = road_profile_h_nodes_[i];
+                problem.AddResidualBlock(
+                    factors::RoadProfileAnchorFactor::Create(ref_h, config_.road_profile_anchor_sigma_m),
+                    nullptr,
+                    &road_profile_h_nodes_[i]);
+                ++road_profile_anchor_factor_count;
+            }
+        }
+
         ceres::Solver::Options options;
         options.max_num_iterations = config_.solver_max_iterations;
         options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
@@ -1041,6 +1127,9 @@ bool System::BuildAndSolveProblem() {
         LOG(INFO) << "Vertical GNSS profile factors: " << vertical_gnss_factor_count;
         LOG(INFO) << "Vertical smoothness factors: " << vertical_smoothness_factor_count;
         LOG(INFO) << "Vertical prior factors: " << vertical_prior_factor_count;
+        LOG(INFO) << "Road-profile GNSS factors: " << road_profile_gnss_factor_count;
+        LOG(INFO) << "Road-profile smoothness factors: " << road_profile_smoothness_factor_count;
+        LOG(INFO) << "Road-profile anchor factors: " << road_profile_anchor_factor_count;
         LOG(INFO) << "Direct spline inertial factors: " << inertial_factor_count;
         LOG(INFO) << "Bias random-walk factors: " << bias_rw_factor_count;
         LOG(INFO) << summary.BriefReport();
@@ -1503,6 +1592,20 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
             Vector3d t_with_vertical = composed.full_pose.translation();
             t_with_vertical.z() += composed.vertical_profile_correction_m;
             composed.full_pose = Sophus::SE3d(composed.full_pose.so3(), t_with_vertical);
+        }
+        if (config_.enable_road_profile_state && road_profile_h_nodes_.size() >= 2 &&
+            road_profile_h_nodes_.size() == road_profile_s_nodes_.size() &&
+            nominal_distance_s_.size() == nominal_nav_.size() && !nominal_nav_.empty()) {
+            std::vector<double> nav_times;
+            nav_times.reserve(nominal_nav_.size());
+            for (const auto& nav : nominal_nav_) {
+                nav_times.push_back(nav.time);
+            }
+            const double s_query = InterpolateScalarSeries(time, nav_times, nominal_distance_s_);
+            const double road_h_ned = InterpolateScalarSeries(s_query, road_profile_s_nodes_, road_profile_h_nodes_);
+            Vector3d t_with_road = composed.full_pose.translation();
+            t_with_road.z() = road_h_ned;
+            composed.full_pose = Sophus::SE3d(composed.full_pose.so3(), t_with_road);
         }
 
         if (const auto delta_bg = EvaluateNodeValueAtTime(time, delta_bg_nodes_)) {
