@@ -24,6 +24,7 @@ struct ImuConfig {
 struct BodyFrameConfig {
     Eigen::Quaterniond q_body_imu = Eigen::Quaterniond::Identity();
     double q_body_imu_prior_sigma_rad = 0.1;
+    std::string nhc_file;
     bool enable_nhc = false;
     bool estimate_q_body_imu = true;
     bool nhc_enable_vx = false;
@@ -47,7 +48,13 @@ struct AppConfig {
     double end_time = 0.0;
     double align_time_s = 30.0;
     double gnss_sigma_horizontal_m = 0.03;
-    double gnss_sigma_vertical_m = 0.05;
+    double gnss_sigma_vertical_m = 0.20;
+    double gnss_vertical_cauchy_scale_m = 0.12;
+    bool enable_vertical_profile_field = false;
+    double vertical_gnss_sigma_m = 0.0;
+    double vertical_gnss_cauchy_scale_m = 0.0;
+    double vertical_smooth_sigma_m = 0.02;
+    double vertical_prior_sigma_m = 0.01;
     double imu_sigma_accel_mps2 = 0.2;
     double imu_sigma_gyro_rps = 0.01;
     double gyro_bias_rw_sigma = 1.0e-4;
@@ -63,6 +70,8 @@ struct AppConfig {
     int solver_max_iterations = 20;
     bool use_gnss_factors = true;
     bool use_imu_factors = true;
+    double output_query_dt_s = 0.0;
+    bool use_direct_spline_state = false;
     bool use_explicit_init_state = false;
     Vector3d init_pos_blh = Vector3d::Zero();
     Vector3d init_vel_ned = Vector3d::Zero();
@@ -83,6 +92,8 @@ struct ComposedState {
     Vector3d full_alpha_body = Vector3d::Zero();
     Vector3d full_bg = Vector3d::Zero();
     Vector3d full_ba = Vector3d::Zero();
+    double vertical_profile_correction_m = 0.0;
+    double base_vertical_ned_m = 0.0;
     Vector3d delta_theta = Vector3d::Zero();
     Vector3d delta_vel_ned = Vector3d::Zero();
     Vector3d delta_pos_ned = Vector3d::Zero();
@@ -120,12 +131,14 @@ private:
     AppConfig config_;
     GnssMeasurementArray gnss_;
     ImuMeasurementArray imu_;
+    NhcMeasurementArray nhc_;
     spline::ControlPointArray control_points_;
     AlignedVec3Array delta_theta_nodes_;
     AlignedVec3Array delta_vel_nodes_;
     AlignedVec3Array delta_pos_nodes_;
     AlignedVec3Array delta_bg_nodes_;
     AlignedVec3Array delta_ba_nodes_;
+    std::vector<double> delta_z_nodes_;
     Vector3d lever_arm_ = Vector3d::Zero();
     Eigen::Quaterniond initial_q_body_imu_ = Eigen::Quaterniond::Identity();
     Eigen::Quaterniond q_body_imu_ = Eigen::Quaterniond::Identity();

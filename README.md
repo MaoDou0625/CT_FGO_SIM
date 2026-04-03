@@ -1,212 +1,182 @@
-# CT_FGO_SIM
+# CT_FGO_SIM zAxisPro
 
-`CT_FGO_SIM` 是从原始 `CT_FGO` 中拆出来的最小连续时间惯导融合实验仓库。当前版本聚焦：
+`CT_FGO_SIM_zAxisPro` is the working branch used for controlled road-profile reconstruction experiments with IMU, RTK, and optional NHC constraints.
 
-- 主 IMU + GNSS/RTK
-- 连续时间样条轨迹
-- 高精度地球模型
-- 最小可运行的批处理与分析工具
+This branch is no longer just the original minimal IMU+GNSS demo. It now contains the direct spline-state implementation used to study distance-domain road reconstruction, IRI preservation, and the effect of wrong constraints.
 
-当前目标不是一次性把轮速、NHC、多外参、多传感器全部带上，而是先把主链路做清楚、做稳定。
+## Current Scope
 
-## 当前能力
+- Continuous-time spline trajectory optimization
+- IMU and GNSS/RTK fusion
+- Optional body-frame NHC measurements
+- Dense trajectory querying for distance-domain reconstruction
+- Controlled simulation support for good-road and poor-road IRI cases
 
-- 读取标准化后的 IMU / RTK 文本数据
-- 构建连续时间样条轨迹
-- 加入 RTK 位置因子、IMU 惯导因子、偏置随机游走因子
-- 用静态段完成粗对准
-- 输出轨迹、偏置、误差图和 RMSE
-- 支持 YuHangTuiChe 数据的批处理
-- 支持按共同位置和按共同轨迹两种方式做高程重复性分析
+## Major Modifications In This Branch
 
-## 数据格式
+### 1. Added direct spline-state mode
 
-### RTK / GNSS
+The original error-state pipeline used a nominal trajectory plus interpolated `delta_pos`, `delta_vel`, and `delta_theta` nodes. In the road-profile experiments, that structure allowed vertical GNSS observations to be written into `delta_pos` nodes too directly, which produced artificial mid-band waviness in the reconstructed road profile.
 
-每行格式：
+To address that, this branch adds:
 
-```text
-time_s lat_rad lon_rad h_m
-```
+- `use_direct_spline_state`
+- direct GNSS factors on spline control points
+- direct continuous inertial factors on spline control points
+- dense state querying through the spline state itself
 
-### IMU
+In this mode, position is no longer carried mainly by `delta_pos` nodes.
 
-每行格式：
+### 2. Added NHC measurement support
 
-```text
-time_s gyro_x_radps gyro_y_radps gyro_z_radps accel_x_mps2 accel_y_mps2 accel_z_mps2
-```
+This branch adds:
 
-## 项目结构
+- `nhc_file` loading
+- `NhcMeasurement` data type
+- `ErrorStateBodyVelocityNhcFactor`
+- optional NHC factor insertion during optimization
 
-```text
-CT_FGO_SIM/
-  apps/
-  config/
-  data/
-  include/
-  src/
-  tools/
-  README.md
-  CMakeLists.txt
-```
+This was introduced to support controlled experiments with:
 
-## 构建与运行
+- correct NHC
+- wrong vertical NHC
+- wrong lateral NHC
+- NHC on/off comparison
 
-### 构建
+### 3. Added dense trajectory output
+
+This branch adds:
+
+- `output_query_dt_s`
+- `dense_trajectory_enu.txt`
+
+The dense output is used by the MATLAB evaluation pipeline to compute distance-domain road curves and IRI without relying only on sparse GNSS-timestamp exports.
+
+## Important Bug Fix
+
+### Coordinate-frame bug in `continuous_inertial_factor`
+
+One major error in an earlier version of this branch was a coordinate-frame inconsistency inside `continuous_inertial_factor`.
+
+The spline control-point translation was stored in local `NED`, but the inertial factor interpreted it with inconsistent axis and sign usage. The most important mistakes were:
+
+- wrong interpretation of horizontal position increments
+- wrong height sign
+- wrong gravity sign
+- inconsistent transport-rate expression
+
+This caused the direct spline-state graph to behave incorrectly and produced unrealistic trajectory errors.
+
+The current branch fixes that by making the factor consistent with `NED`:
+
+- `lat = lat0 + north / (rm + h)`
+- `h = h0 - down`
+- `gravity_n = [0, 0, +g]`
+- transport-rate terms computed from `v_ned`
+
+This fix is critical. Without it, the direct spline-state branch does not produce reliable geometry.
+
+## Parameter Tuning Attempts
+
+This branch includes a number of parameter investigations carried out for the controlled IRI experiments.
+
+### Initialization
+
+- added long static alignment before motion in the simulation pipeline
+- used the same alignment result for both KF and CT
+- avoided starting directly with a velocity step
+
+### GNSS vertical weighting
+
+Tested by increasing `gnss_sigma_vertical_m` so that CT and KF use comparable vertical RTK confidence.
+
+Observed effect:
+
+- too small: vertical GNSS writes profile waviness into the solution
+- too large: the trajectory becomes over-smoothed and IRI is underestimated
+
+### Control-point spacing
+
+Tested by changing `kf_interval_sec`.
+
+Observed effect:
+
+- too dense: easier to reproduce GNSS-induced mid-band waviness
+- too sparse: over-smoothing and loss of road-profile detail
+
+### IMU residual sigmas
+
+Tested by gradually reducing:
+
+- `imu_sigma_accel_mps2`
+- `imu_sigma_gyro_rps`
+
+Observed effect:
+
+- modest reduction can improve geometry slightly
+- too small causes instability or drives the solution into an over-constrained regime
+
+### NHC on/off comparison
+
+The branch now supports explicit comparison between:
+
+- `nhc_off`
+- `nhc_on`
+
+This is intended for later controlled studies of correct and wrong NHC behavior. The NHC implementation should always be interpreted together with the direct spline-state structure and the current simulation setup.
+
+## What Was Learned From The Debugging
+
+The most important lessons from this branch are:
+
+1. A low global RMSE does not guarantee correct road-profile reconstruction.
+2. If GNSS vertical observations are allowed to directly drive free position-error nodes, the reconstructed road profile can develop false mid-band waviness.
+3. IRI can therefore be badly biased even when absolute position RMSE is small.
+4. The coordinate frame inside the continuous inertial factor must be strictly consistent with the spline state definition.
+5. For road-profile applications, preserving the structure of the distance-domain curve matters as much as minimizing navigation RMSE.
+
+## Repository Cleanliness
+
+This repository should only retain source code, configs, and useful tools.
+
+The following should not be committed:
+
+- build folders
+- local debug outputs
+- temporary stdout and stderr logs
+- generated trajectory folders
+
+The `.gitignore` has been updated accordingly.
+
+## Build
 
 ```powershell
-cmake -S D:\Code\CT_FGO_SIM -B D:\Code\CT_FGO_SIM\build
-cmake --build D:\Code\CT_FGO_SIM\build --config Release
+cmake -S D:\Code\CT_FGO_SIM_zAxisPro -B D:\Code\CT_FGO_SIM_zAxisPro\build_zAxisPro
+cmake --build D:\Code\CT_FGO_SIM_zAxisPro\build_zAxisPro --config Release
 ```
 
-### 单组运行
+## Run
 
 ```powershell
-D:\Code\CT_FGO_SIM\build\Release\ct_fgo_sim_main.exe D:\Code\CT_FGO_SIM\config\minimal.yaml
+D:\Code\CT_FGO_SIM_zAxisPro\build_zAxisPro\Release\ct_fgo_sim_main.exe D:\Code\CT_FGO_SIM_zAxisPro\config\minimal.yaml
 ```
 
-## 工具脚本
+## Files Most Relevant To The Current zAxisPro Work
 
-下面这些 Python 脚本都是工具性脚本，用于数据准备、批处理、绘图和重复性分析。
+- `src/core/system.cpp`
+- `include/ct_fgo_sim/core/system.h`
+- `include/ct_fgo_sim/factors/continuous_inertial_factor.h`
+- `include/ct_fgo_sim/factors/error_state_nhc_factor.h`
+- `include/ct_fgo_sim/io/text_measurement_io.h`
+- `include/ct_fgo_sim/types.h`
 
-### `tools/convert_yuhang_dataset.py`
+## Status
 
-作用：
+This branch is the important experimental branch used for the current thesis-oriented road reconstruction work.
 
-- 将原始 `YuHangTuiChe` 数据转换成 `CT_FGO_SIM` 直接可读的标准格式
+It should be treated as:
 
-输入：
+- the reference branch for direct spline-state CT-FGO experiments
+- the branch where the coordinate-frame error was fixed
+- the branch where NHC support and dense output were introduced
 
-- 原始 `rtk_cut.txt`
-- 原始 `imu_cut.txt`
-
-输出：
-
-- `rtk_ct_fgo_sim.txt`
-- `imu_ct_fgo_sim.txt`
-- `schema.md`
-
-### `tools/run_yuhang_batch.py`
-
-作用：
-
-- 批量运行 `YuHangTuiChe` 下所有 `transformed1cut*` 分组
-- 自动生成每组配置
-- 自动调用主程序和误差绘图脚本
-
-输出根目录：
-
-- `D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_results`
-
-### `tools/plot_outputs.py`
-
-作用：
-
-- 对单组结果生成误差图和对比图
-- 统计 `rmse_e/n/u/h/3d`
-- 识别 IMU 静止到运动的起始时刻，并把时间标到误差图上
-
-输出：
-
-- `horizontal_compare.png`
-- `horizontal_error.png`
-- `height_compare.png`
-- `height_error.png`
-- `enu_error_timeseries.png`
-- `metrics_summary.txt`
-
-用法：
-
-```powershell
-python D:\Code\CT_FGO_SIM\tools\plot_outputs.py --output-dir D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_results\20260122_145751_use\transformed1cut1
-```
-
-### `tools/analyze_yuhang_repeatability.py`
-
-作用：
-
-- 基于所有组结果，寻找“所有组共有的 RTK 位置”
-- 统计这些共同位置上每组的 RTK 高程和导航高程
-- 比较 RTK 与导航的高程重复性
-
-注意：
-
-- 这里的导航高程已经修正为绝对高程，不再直接使用局部 ENU 的 `Up`
-
-输出目录：
-
-- `D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_results\repeatability_analysis`
-
-主要输出：
-
-- `common_position_group_heights.csv`
-- `common_position_repeatability.csv`
-- `repeatability_summary.txt`
-
-### `tools/plot_repeatability_heights.py`
-
-作用：
-
-- 基于共同位置高程统计表，绘制：
-  - 导航高程汇总图
-  - RTK 高程汇总图
-
-输出：
-
-- `navigation_height_summary.png`
-- `rtk_height_summary.png`
-
-### `tools/analyze_yuhang_common_trajectory.py`
-
-作用：
-
-- 针对“同一路段重复跑，但起点终点不完全一致”的场景
-- 先生成一条公共参考轨迹
-- 再根据公共轨迹的共同起终点截取各组数据
-- 按公共里程 `s` 分箱统计 RTK 和导航高程重复性
-
-输出目录：
-
-- `D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_results\common_trajectory_analysis`
-
-主要输出：
-
-- `common_trajectory_summary.txt`
-- `segment_coverage.csv`
-- `reference_common_trajectory.csv`
-- `trimmed_group_heights_by_s.csv`
-- `repeatability_by_s_bin.csv`
-- `navigation_height_vs_common_s.png`
-- `rtk_height_vs_common_s.png`
-- `height_repeatability_std_vs_common_s.png`
-
-## 当前已验证的数据集
-
-- `D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_use`
-
-当前已完成：
-
-- 5 组数据批处理
-- 单组误差分析
-- 共同位置高程重复性分析
-- 公共轨迹截取与按里程高程重复性分析
-
-## 当前结论
-
-按“公共轨迹 + 公共区间 + 1 m 里程分箱”的方案，5 组数据的高程重复性结果为：
-
-- RTK 高程重复性均值标准差约 `0.0119 m`
-- 导航高程重复性均值标准差约 `0.0126 m`
-
-说明当前版本在这批数据上的高程重复性已经接近 RTK。
-
-## 下一步
-
-后续可以在新分支继续做：
-
-- NHC 引入与测试
-- 融合中心线替代单组参考轨迹
-- 更稳健的轨迹投影和公共区间提取
-- 时间偏差 `td` 放开估计
-- 高程异常段鲁棒处理

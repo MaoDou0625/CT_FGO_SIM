@@ -1,8 +1,13 @@
 #include "ct_fgo_sim/core/system.h"
 
+#include "ct_fgo_sim/factors/bias_random_walk_factor.h"
+#include "ct_fgo_sim/factors/continuous_gnss_factor.h"
+#include "ct_fgo_sim/factors/continuous_inertial_factor.h"
 #include "ct_fgo_sim/factors/error_state_gnss_factor.h"
 #include "ct_fgo_sim/factors/error_state_interval_factor.h"
+#include "ct_fgo_sim/factors/error_state_nhc_factor.h"
 #include "ct_fgo_sim/factors/quaternion_prior_factor.h"
+#include "ct_fgo_sim/factors/vertical_profile_factor.h"
 #include "ct_fgo_sim/io/text_measurement_io.h"
 
 #include <ceres/ceres.h>
@@ -226,20 +231,41 @@ int FindNodeIntervalStart(const spline::ControlPointArray& control_points, doubl
     return std::max(0, static_cast<int>(std::distance(control_points.begin(), upper)) - 1);
 }
 
-Eigen::Matrix3d BuildGnssSqrtInfo(double sigma_horizontal_m, double sigma_vertical_m) {
-    Eigen::Matrix3d sqrt_info = Eigen::Matrix3d::Zero();
-    sqrt_info(0, 0) = 1.0 / std::max(1.0e-6, sigma_horizontal_m);
-    sqrt_info(1, 1) = 1.0 / std::max(1.0e-6, sigma_horizontal_m);
-    sqrt_info(2, 2) = 1.0 / std::max(1.0e-6, sigma_vertical_m);
-    return sqrt_info;
-}
-
 Vector3d InterpolateNodeValue(
     double time,
     const spline::ControlPointArray& control_points,
     const AlignedVec3Array& nodes) {
     if (control_points.empty() || nodes.empty() || control_points.size() != nodes.size()) {
         return Vector3d::Zero();
+    }
+    if (time <= control_points.front().Timestamp()) {
+        return nodes.front();
+    }
+    if (time >= control_points.back().Timestamp()) {
+        return nodes.back();
+    }
+
+    const auto upper = std::lower_bound(
+        control_points.begin(),
+        control_points.end(),
+        time,
+        [](const spline::ControlPoint& control_point, double t) { return control_point.Timestamp() < t; });
+    const size_t j = static_cast<size_t>(std::distance(control_points.begin(), upper));
+    const size_t i = j - 1;
+    const double dt = control_points[j].Timestamp() - control_points[i].Timestamp();
+    if (dt <= 1.0e-9) {
+        return nodes[i];
+    }
+    const double u = std::clamp((time - control_points[i].Timestamp()) / dt, 0.0, 1.0);
+    return nodes[i] * (1.0 - u) + nodes[j] * u;
+}
+
+double InterpolateScalarNodeValue(
+    double time,
+    const spline::ControlPointArray& control_points,
+    const std::vector<double>& nodes) {
+    if (control_points.empty() || nodes.empty() || control_points.size() != nodes.size()) {
+        return 0.0;
     }
     if (time <= control_points.front().Timestamp()) {
         return nodes.front();
@@ -322,6 +348,24 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     if (cfg["gnss_sigma_vertical_m"]) {
         config_.gnss_sigma_vertical_m = cfg["gnss_sigma_vertical_m"].as<double>();
     }
+    if (cfg["gnss_vertical_cauchy_scale_m"]) {
+        config_.gnss_vertical_cauchy_scale_m = cfg["gnss_vertical_cauchy_scale_m"].as<double>();
+    }
+    if (cfg["enable_vertical_profile_field"]) {
+        config_.enable_vertical_profile_field = cfg["enable_vertical_profile_field"].as<bool>();
+    }
+    if (cfg["vertical_gnss_sigma_m"]) {
+        config_.vertical_gnss_sigma_m = cfg["vertical_gnss_sigma_m"].as<double>();
+    }
+    if (cfg["vertical_gnss_cauchy_scale_m"]) {
+        config_.vertical_gnss_cauchy_scale_m = cfg["vertical_gnss_cauchy_scale_m"].as<double>();
+    }
+    if (cfg["vertical_smooth_sigma_m"]) {
+        config_.vertical_smooth_sigma_m = cfg["vertical_smooth_sigma_m"].as<double>();
+    }
+    if (cfg["vertical_prior_sigma_m"]) {
+        config_.vertical_prior_sigma_m = cfg["vertical_prior_sigma_m"].as<double>();
+    }
     if (cfg["imu_sigma_accel_mps2"]) {
         config_.imu_sigma_accel_mps2 = cfg["imu_sigma_accel_mps2"].as<double>();
     }
@@ -370,6 +414,12 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     if (cfg["use_imu_factors"]) {
         config_.use_imu_factors = cfg["use_imu_factors"].as<bool>();
     }
+    if (cfg["output_query_dt_s"]) {
+        config_.output_query_dt_s = cfg["output_query_dt_s"].as<double>();
+    }
+    if (cfg["use_direct_spline_state"]) {
+        config_.use_direct_spline_state = cfg["use_direct_spline_state"].as<bool>();
+    }
     if (cfg["initpos"] && cfg["initvel"] && cfg["initatt"]) {
         const auto initpos = cfg["initpos"].as<std::vector<double>>();
         const auto initvel = cfg["initvel"].as<std::vector<double>>();
@@ -403,6 +453,13 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
         }
         if (body["q_body_imu_prior_sigma_rad"]) {
             config_.body_frame.q_body_imu_prior_sigma_rad = body["q_body_imu_prior_sigma_rad"].as<double>();
+        }
+        if (body["nhc_file"]) {
+            std::filesystem::path nhc_path = body["nhc_file"].as<std::string>();
+            if (nhc_path.is_relative()) {
+                nhc_path = config_dir / nhc_path;
+            }
+            config_.body_frame.nhc_file = nhc_path.lexically_normal().string();
         }
         if (body["enable_nhc"]) {
             config_.body_frame.enable_nhc = body["enable_nhc"].as<bool>();
@@ -525,6 +582,9 @@ bool System::Run() {
         if (!BuildAndSolveProblem()) {
             return false;
         }
+        if (config_.use_direct_spline_state) {
+            continue;
+        }
         if (outer_iter + 1 < config_.outer_iterations) {
             ApplyInitialYawFeedbackFromGnss();
         }
@@ -553,12 +613,20 @@ void System::Describe() const {
     LOG(INFO) << "Spline dt: " << config_.spline_dt_s;
     LOG(INFO) << "Time window: [" << config_.start_time << ", " << config_.end_time << "]";
     LOG(INFO) << "GNSS sigma(h/v): " << config_.gnss_sigma_horizontal_m << ", " << config_.gnss_sigma_vertical_m;
+    LOG(INFO) << "GNSS vertical Cauchy scale (m): " << config_.gnss_vertical_cauchy_scale_m;
+    LOG(INFO) << "Enable vertical profile field: " << (config_.enable_vertical_profile_field ? "true" : "false");
+    LOG(INFO) << "Vertical GNSS sigma (m): " << config_.vertical_gnss_sigma_m;
+    LOG(INFO) << "Vertical GNSS Cauchy scale (m): " << config_.vertical_gnss_cauchy_scale_m;
+    LOG(INFO) << "Vertical smooth sigma (m): " << config_.vertical_smooth_sigma_m;
+    LOG(INFO) << "Vertical prior sigma (m): " << config_.vertical_prior_sigma_m;
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
     LOG(INFO) << "IMU stride: " << config_.imu_stride;
     LOG(INFO) << "Outer iterations: " << config_.outer_iterations;
     LOG(INFO) << "Enable initial yaw feedback: " << (config_.enable_initial_yaw_feedback ? "true" : "false");
     LOG(INFO) << "Use GNSS factors: " << (config_.use_gnss_factors ? "true" : "false");
     LOG(INFO) << "Use IMU factors: " << (config_.use_imu_factors ? "true" : "false");
+    LOG(INFO) << "Output query dt: " << config_.output_query_dt_s;
+    LOG(INFO) << "Use direct spline state: " << (config_.use_direct_spline_state ? "true" : "false");
     LOG(INFO) << "Enable body NHC: " << (config_.body_frame.enable_nhc ? "true" : "false");
     LOG(INFO) << "Estimate q_body_imu: "
               << ((config_.body_frame.enable_nhc && config_.body_frame.estimate_q_body_imu) ? "true" : "false");
@@ -571,6 +639,11 @@ void System::Describe() const {
 bool System::LoadMeasurements() {
     gnss_ = io::LoadGnssFile(config_.gnss_file);
     imu_ = io::LoadImuFile(config_.imu_main.file, config_.imu_main.values_are_increments);
+    if (config_.body_frame.enable_nhc && !config_.body_frame.nhc_file.empty()) {
+        nhc_ = io::LoadNhcFile(config_.body_frame.nhc_file);
+    } else {
+        nhc_.clear();
+    }
     if (gnss_.empty()) {
         LOG(ERROR) << "No GNSS measurements loaded from " << config_.gnss_file;
         return false;
@@ -594,6 +667,9 @@ void System::TrimMeasurementsToTimeWindow() {
     imu_.erase(
         std::remove_if(imu_.begin(), imu_.end(), [&](const ImuMeasurement& m) { return !in_window(m.time); }),
         imu_.end());
+    nhc_.erase(
+        std::remove_if(nhc_.begin(), nhc_.end(), [&](const NhcMeasurement& m) { return !in_window(m.time); }),
+        nhc_.end());
 }
 
 bool System::InitializeControlPoints() {
@@ -639,17 +715,20 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
     AlignedVec3Array new_delta_pos(new_control_points.size(), Vector3d::Zero());
     AlignedVec3Array new_delta_bg(new_control_points.size(), Vector3d::Zero());
     AlignedVec3Array new_delta_ba(new_control_points.size(), Vector3d::Zero());
+    std::vector<double> new_delta_z(new_control_points.size(), 0.0);
     if (!reset_biases) {
         if (delta_theta_nodes_.size() == new_control_points.size() &&
             delta_vel_nodes_.size() == new_control_points.size() &&
             delta_pos_nodes_.size() == new_control_points.size() &&
             delta_bg_nodes_.size() == new_control_points.size() &&
-            delta_ba_nodes_.size() == new_control_points.size()) {
+            delta_ba_nodes_.size() == new_control_points.size() &&
+            delta_z_nodes_.size() == new_control_points.size()) {
             new_delta_theta = delta_theta_nodes_;
             new_delta_vel = delta_vel_nodes_;
             new_delta_pos = delta_pos_nodes_;
             new_delta_bg = delta_bg_nodes_;
             new_delta_ba = delta_ba_nodes_;
+            new_delta_z = delta_z_nodes_;
         } else {
             LOG(WARNING) << "Delta-state node count changed from " << delta_theta_nodes_.size()
                          << " to " << new_control_points.size()
@@ -663,6 +742,7 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
     delta_pos_nodes_ = std::move(new_delta_pos);
     delta_bg_nodes_ = std::move(new_delta_bg);
     delta_ba_nodes_ = std::move(new_delta_ba);
+    delta_z_nodes_ = std::move(new_delta_z);
     try {
         BuildIntervalPropagationCache(
             imu_,
@@ -690,6 +770,220 @@ bool System::BuildAndSolveProblem() {
         return false;
     }
 
+    if (config_.use_direct_spline_state) {
+        if (control_points_.size() < 4) {
+            LOG(ERROR) << "Direct spline-state mode needs at least 4 control points";
+            return false;
+        }
+
+        ceres::Problem problem;
+        for (auto& control_point : control_points_) {
+            problem.AddParameterBlock(
+                control_point.PoseData(),
+                Sophus::SE3d::num_parameters,
+                new Sophus::Manifold<Sophus::SE3>());
+        }
+        for (auto& delta_bg : delta_bg_nodes_) {
+            problem.AddParameterBlock(delta_bg.data(), 3);
+        }
+        for (auto& delta_ba : delta_ba_nodes_) {
+            problem.AddParameterBlock(delta_ba.data(), 3);
+        }
+        if (config_.enable_vertical_profile_field) {
+            for (auto& delta_z : delta_z_nodes_) {
+                problem.AddParameterBlock(&delta_z, 1);
+            }
+        }
+        problem.AddParameterBlock(lever_arm_.data(), 3);
+        problem.AddParameterBlock(&time_offset_s_, 1);
+        problem.AddParameterBlock(q_body_imu_.coeffs().data(), 4, new ceres::EigenQuaternionManifold);
+
+        problem.SetParameterBlockConstant(control_points_.front().PoseData());
+        problem.SetParameterBlockConstant(delta_bg_nodes_.front().data());
+        problem.SetParameterBlockConstant(delta_ba_nodes_.front().data());
+        if (config_.enable_vertical_profile_field && !delta_z_nodes_.empty()) {
+            problem.SetParameterBlockConstant(&delta_z_nodes_.front());
+        }
+        problem.SetParameterBlockConstant(lever_arm_.data());
+        problem.SetParameterBlockConstant(&time_offset_s_);
+        problem.SetParameterBlockConstant(q_body_imu_.coeffs().data());
+
+        int gnss_factor_count = 0;
+        if (config_.use_gnss_factors) {
+            for (const auto& gnss : gnss_) {
+                const int start = FindSplineWindowStart(control_points_, config_.spline_dt_s, gnss.time);
+                if (start < 0 || start + 3 >= static_cast<int>(control_points_.size())) {
+                    continue;
+                }
+                const double dt = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
+                if (dt <= 1.0e-9) {
+                    continue;
+                }
+                const Vector3d meas_pos_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
+                Matrix3d sqrt_info = Matrix3d::Zero();
+                sqrt_info(0, 0) = 1.0 / std::max(1.0e-6, config_.gnss_sigma_horizontal_m);
+                sqrt_info(1, 1) = 1.0 / std::max(1.0e-6, config_.gnss_sigma_horizontal_m);
+                sqrt_info(2, 2) = 1.0 / std::max(1.0e-6, config_.gnss_sigma_vertical_m);
+                problem.AddResidualBlock(
+                    factors::ContinuousGnssFactor::Create(
+                        gnss.time,
+                        dt,
+                        control_points_[start].Timestamp(),
+                        meas_pos_ned,
+                        sqrt_info),
+                    nullptr,
+                    control_points_[start].PoseData(),
+                    control_points_[start + 1].PoseData(),
+                    control_points_[start + 2].PoseData(),
+                    control_points_[start + 3].PoseData(),
+                    lever_arm_.data());
+                ++gnss_factor_count;
+            }
+        }
+
+        int vertical_gnss_factor_count = 0;
+        int vertical_smoothness_factor_count = 0;
+        int vertical_prior_factor_count = 0;
+        if (config_.enable_vertical_profile_field && config_.use_gnss_factors) {
+            const double vertical_sigma = config_.vertical_gnss_sigma_m > 0.0
+                ? config_.vertical_gnss_sigma_m
+                : config_.gnss_sigma_vertical_m;
+            const double cauchy_scale = config_.vertical_gnss_cauchy_scale_m > 0.0
+                ? config_.vertical_gnss_cauchy_scale_m
+                : config_.gnss_vertical_cauchy_scale_m;
+            for (const auto& gnss : gnss_) {
+                const int start = FindSplineWindowStart(control_points_, config_.spline_dt_s, gnss.time);
+                if (start < 0 || start + 3 >= static_cast<int>(control_points_.size()) ||
+                    start + 1 >= static_cast<int>(delta_z_nodes_.size())) {
+                    continue;
+                }
+                const double dt = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
+                if (dt <= 1.0e-9) {
+                    continue;
+                }
+                const Vector3d meas_pos_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
+                ceres::LossFunction* vertical_loss = nullptr;
+                if (cauchy_scale > 0.0) {
+                    vertical_loss = new ceres::CauchyLoss(cauchy_scale / std::max(1.0e-6, vertical_sigma));
+                }
+                problem.AddResidualBlock(
+                    factors::ContinuousVerticalGnssFactor::Create(
+                        gnss.time,
+                        dt,
+                        control_points_[start].Timestamp(),
+                        meas_pos_ned.z(),
+                        vertical_sigma),
+                    vertical_loss,
+                    control_points_[start].PoseData(),
+                    control_points_[start + 1].PoseData(),
+                    control_points_[start + 2].PoseData(),
+                    control_points_[start + 3].PoseData(),
+                    &delta_z_nodes_[start],
+                    &delta_z_nodes_[start + 1],
+                    lever_arm_.data());
+                ++vertical_gnss_factor_count;
+            }
+            for (int i = 0; i + 1 < static_cast<int>(delta_z_nodes_.size()); ++i) {
+                problem.AddResidualBlock(
+                    factors::VerticalSmoothnessFactor::Create(config_.vertical_smooth_sigma_m),
+                    nullptr,
+                    &delta_z_nodes_[i],
+                    &delta_z_nodes_[i + 1]);
+                ++vertical_smoothness_factor_count;
+            }
+            for (size_t i = 1; i < delta_z_nodes_.size(); ++i) {
+                problem.AddResidualBlock(
+                    factors::VerticalZeroPriorFactor::Create(config_.vertical_prior_sigma_m),
+                    nullptr,
+                    &delta_z_nodes_[i]);
+                ++vertical_prior_factor_count;
+            }
+        }
+
+        int inertial_factor_count = 0;
+        if (config_.use_imu_factors) {
+            const size_t imu_stride = static_cast<size_t>(std::max(1, config_.imu_stride));
+            for (size_t imu_index = 1; imu_index < imu_.size(); imu_index += imu_stride) {
+                const auto& meas = imu_[imu_index];
+                if (meas.dt <= 1.0e-9) {
+                    continue;
+                }
+                const int start = FindSplineWindowStart(control_points_, config_.spline_dt_s, meas.time);
+                if (start < 0 || start + 3 >= static_cast<int>(control_points_.size()) ||
+                    start + 1 >= static_cast<int>(delta_bg_nodes_.size()) ||
+                    start + 1 >= static_cast<int>(delta_ba_nodes_.size())) {
+                    continue;
+                }
+                const double dt = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
+                if (dt <= 1.0e-9) {
+                    continue;
+                }
+                const Vector3d gyro_meas = meas.dtheta / meas.dt;
+                const Vector3d accel_meas = meas.dvel / meas.dt;
+                problem.AddResidualBlock(
+                    factors::ContinuousInertialFactor::Create(
+                        meas.time,
+                        accel_meas,
+                        gyro_meas,
+                        origin_blh_,
+                        dt,
+                        control_points_[start].Timestamp(),
+                        config_.imu_sigma_accel_mps2,
+                        config_.imu_sigma_gyro_rps),
+                    nullptr,
+                    control_points_[start].PoseData(),
+                    control_points_[start + 1].PoseData(),
+                    control_points_[start + 2].PoseData(),
+                    control_points_[start + 3].PoseData(),
+                    delta_bg_nodes_[start].data(),
+                    delta_bg_nodes_[start + 1].data(),
+                    delta_ba_nodes_[start].data(),
+                    delta_ba_nodes_[start + 1].data(),
+                    lever_arm_.data(),
+                    &time_offset_s_);
+                ++inertial_factor_count;
+            }
+        }
+
+        int bias_rw_factor_count = 0;
+        for (int i = 0; i + 1 < static_cast<int>(control_points_.size()); ++i) {
+            const double dt = control_points_[i + 1].Timestamp() - control_points_[i].Timestamp();
+            if (dt <= 1.0e-9) {
+                continue;
+            }
+            problem.AddResidualBlock(
+                factors::BiasRandomWalkFactor::Create(dt, config_.gyro_bias_rw_sigma, config_.bias_tau_s),
+                nullptr,
+                delta_bg_nodes_[i].data(),
+                delta_bg_nodes_[i + 1].data());
+            problem.AddResidualBlock(
+                factors::BiasRandomWalkFactor::Create(dt, config_.accel_bias_rw_sigma, config_.bias_tau_s),
+                nullptr,
+                delta_ba_nodes_[i].data(),
+                delta_ba_nodes_[i + 1].data());
+            bias_rw_factor_count += 2;
+        }
+
+        ceres::Solver::Options options;
+        options.max_num_iterations = config_.solver_max_iterations;
+        options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+        options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+        options.num_threads = std::max(1u, std::thread::hardware_concurrency());
+        options.minimizer_progress_to_stdout = true;
+
+        ceres::Solver::Summary summary;
+        ceres::Solve(options, &problem, &summary);
+
+        LOG(INFO) << "Direct spline GNSS factors: " << gnss_factor_count;
+        LOG(INFO) << "Vertical GNSS profile factors: " << vertical_gnss_factor_count;
+        LOG(INFO) << "Vertical smoothness factors: " << vertical_smoothness_factor_count;
+        LOG(INFO) << "Vertical prior factors: " << vertical_prior_factor_count;
+        LOG(INFO) << "Direct spline inertial factors: " << inertial_factor_count;
+        LOG(INFO) << "Bias random-walk factors: " << bias_rw_factor_count;
+        LOG(INFO) << summary.BriefReport();
+        return summary.termination_type != ceres::FAILURE;
+    }
+
     ceres::Problem problem;
     for (auto& delta_theta : delta_theta_nodes_) {
         problem.AddParameterBlock(delta_theta.data(), 3);
@@ -714,7 +1008,9 @@ bool System::BuildAndSolveProblem() {
     problem.SetParameterBlockConstant(delta_bg_nodes_.front().data());
     problem.SetParameterBlockConstant(delta_ba_nodes_.front().data());
     problem.SetParameterBlockConstant(&time_offset_s_);
-    problem.SetParameterBlockConstant(q_body_imu_.coeffs().data());
+    if (!(config_.body_frame.enable_nhc && config_.body_frame.estimate_q_body_imu)) {
+        problem.SetParameterBlockConstant(q_body_imu_.coeffs().data());
+    }
 
     problem.AddResidualBlock(
         factors::QuaternionPriorFactor::Create(
@@ -723,9 +1019,8 @@ bool System::BuildAndSolveProblem() {
         nullptr,
         q_body_imu_.coeffs().data());
 
-    const Eigen::Matrix3d gnss_sqrt_info =
-        BuildGnssSqrtInfo(config_.gnss_sigma_horizontal_m, config_.gnss_sigma_vertical_m);
-    int gnss_factor_count = 0;
+    int gnss_horizontal_factor_count = 0;
+    int gnss_vertical_factor_count = 0;
     if (config_.use_gnss_factors) {
         for (const auto& gnss : gnss_) {
             const int start = FindNodeIntervalStart(control_points_, gnss.time);
@@ -742,15 +1037,100 @@ bool System::BuildAndSolveProblem() {
             }
             const double u = std::clamp((gnss.time - control_points_[start].Timestamp()) / dt, 0.0, 1.0);
             const Vector3d nominal_pos_ned = Earth::GlobalToLocal(origin_blh_, nominal_state->blh);
-            const Vector3d local_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
-            ceres::CostFunction* cost = factors::ErrorStateGnssFactor::Create(
-                u, nominal_pos_ned, local_ned, gnss_sqrt_info);
+            const Vector3d meas_pos_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
+
             problem.AddResidualBlock(
-                cost,
+                factors::ErrorStateGnssHorizontalLeverArmFactor::Create(
+                    u,
+                    nominal_pos_ned,
+                    nominal_state->q_nb,
+                    lever_arm_,
+                    meas_pos_ned,
+                    config_.gnss_sigma_horizontal_m),
                 nullptr,
                 delta_pos_nodes_[start].data(),
-                delta_pos_nodes_[start + 1].data());
-            ++gnss_factor_count;
+                delta_pos_nodes_[start + 1].data(),
+                delta_theta_nodes_[start].data(),
+                delta_theta_nodes_[start + 1].data());
+            ++gnss_horizontal_factor_count;
+
+            ceres::LossFunction* vertical_loss = nullptr;
+            if (config_.gnss_vertical_cauchy_scale_m > 0.0) {
+                const double whitened_scale =
+                    config_.gnss_vertical_cauchy_scale_m / std::max(1.0e-6, config_.gnss_sigma_vertical_m);
+                vertical_loss = new ceres::CauchyLoss(whitened_scale);
+            }
+            problem.AddResidualBlock(
+                factors::ErrorStateGnssVerticalLeverArmFactor::Create(
+                    u,
+                    nominal_pos_ned,
+                    nominal_state->q_nb,
+                    lever_arm_,
+                    meas_pos_ned,
+                    config_.gnss_sigma_vertical_m),
+                vertical_loss,
+                delta_pos_nodes_[start].data(),
+                delta_pos_nodes_[start + 1].data(),
+                delta_theta_nodes_[start].data(),
+                delta_theta_nodes_[start + 1].data());
+            ++gnss_vertical_factor_count;
+        }
+    }
+
+    int nhc_factor_count = 0;
+    if (config_.body_frame.enable_nhc) {
+        const bool any_axis_enabled =
+            config_.body_frame.nhc_enable_vx || config_.body_frame.nhc_enable_vy || config_.body_frame.nhc_enable_vz;
+        const Vector3d sigma_body_mps(
+            config_.body_frame.nhc_enable_vx ? config_.body_frame.nhc_sigma_vx_mps : -1.0,
+            config_.body_frame.nhc_enable_vy ? config_.body_frame.nhc_sigma_vy_mps : -1.0,
+            config_.body_frame.nhc_enable_vz ? config_.body_frame.nhc_sigma_vz_mps : -1.0);
+        if (any_axis_enabled) {
+            const size_t nhc_stride = static_cast<size_t>(std::max(1, config_.imu_stride));
+            for (size_t nhc_index = 0; nhc_index < nhc_.size(); nhc_index += nhc_stride) {
+                const auto& nhc = nhc_[nhc_index];
+                const int start = FindNodeIntervalStart(control_points_, nhc.time);
+                if (start < 0 || start + 1 >= static_cast<int>(control_points_.size())) {
+                    continue;
+                }
+                const auto nominal_state = EvaluateNominalState(nominal_nav_, nhc.time);
+                if (!nominal_state) {
+                    continue;
+                }
+                const double dt = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
+                if (dt <= 1.0e-9) {
+                    continue;
+                }
+                const double u = std::clamp((nhc.time - control_points_[start].Timestamp()) / dt, 0.0, 1.0);
+                Vector3d target_vel_body(
+                    config_.body_frame.nhc_target_vx_mps,
+                    config_.body_frame.nhc_target_vy_mps,
+                    config_.body_frame.nhc_target_vz_mps);
+                if (config_.body_frame.nhc_enable_vx) {
+                    target_vel_body.x() = nhc.vel_body_mps.x();
+                }
+                if (config_.body_frame.nhc_enable_vy) {
+                    target_vel_body.y() = nhc.vel_body_mps.y();
+                }
+                if (config_.body_frame.nhc_enable_vz) {
+                    target_vel_body.z() = nhc.vel_body_mps.z();
+                }
+
+                problem.AddResidualBlock(
+                    factors::ErrorStateBodyVelocityNhcFactor::Create(
+                        u,
+                        nominal_state->q_nb,
+                        nominal_state->vel_ned,
+                        target_vel_body,
+                        sigma_body_mps),
+                    nullptr,
+                    delta_theta_nodes_[start].data(),
+                    delta_theta_nodes_[start + 1].data(),
+                    delta_vel_nodes_[start].data(),
+                    delta_vel_nodes_[start + 1].data(),
+                    q_body_imu_.coeffs().data());
+                ++nhc_factor_count;
+            }
         }
     }
 
@@ -793,7 +1173,9 @@ bool System::BuildAndSolveProblem() {
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
 
-    LOG(INFO) << "GNSS factors: " << gnss_factor_count;
+    LOG(INFO) << "GNSS factors (horizontal / vertical): "
+              << gnss_horizontal_factor_count << " / " << gnss_vertical_factor_count;
+    LOG(INFO) << "NHC factors: " << nhc_factor_count;
     LOG(INFO) << "Interval propagation factors: " << process_factor_count;
     LOG(INFO) << summary.BriefReport();
     return summary.termination_type != ceres::FAILURE;
@@ -1021,6 +1403,58 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
     const auto nominal_state = EvaluateNominalState(nominal_nav_, time);
     if (!nominal_state) {
         return std::nullopt;
+    }
+
+    if (config_.use_direct_spline_state && control_points_.size() >= 4) {
+        const int start = FindSplineWindowStart(control_points_, config_.spline_dt_s, time);
+        if (start < 0 || start + 3 >= static_cast<int>(control_points_.size())) {
+            return std::nullopt;
+        }
+        const double dt = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
+        if (dt <= 1.0e-9) {
+            return std::nullopt;
+        }
+        const double u = std::clamp((time - control_points_[start].Timestamp()) / dt, 0.0, 1.0);
+        const auto result = spline::BSplineEvaluator::Evaluate(
+            u,
+            dt,
+            control_points_[start].Pose(),
+            control_points_[start + 1].Pose(),
+            control_points_[start + 2].Pose(),
+            control_points_[start + 3].Pose());
+
+        ComposedState composed;
+        composed.time = time;
+        composed.nominal = *nominal_state;
+        composed.full_pose = result.pose;
+        composed.full_vel_ned = result.v_world;
+        composed.full_vel_body = result.v_body;
+        composed.full_accel_ned = result.a_world;
+        composed.full_omega_body = result.w_body;
+        composed.full_alpha_body = result.alpha_body;
+        composed.base_vertical_ned_m = result.pose.translation().z();
+
+        if (config_.enable_vertical_profile_field && delta_z_nodes_.size() == control_points_.size()) {
+            composed.vertical_profile_correction_m =
+                InterpolateScalarNodeValue(time, control_points_, delta_z_nodes_);
+            Vector3d t_with_vertical = composed.full_pose.translation();
+            t_with_vertical.z() += composed.vertical_profile_correction_m;
+            composed.full_pose = Sophus::SE3d(composed.full_pose.so3(), t_with_vertical);
+        }
+
+        if (const auto delta_bg = EvaluateNodeValueAtTime(time, delta_bg_nodes_)) {
+            composed.full_bg = initial_alignment_.bg0 + *delta_bg;
+            composed.full_omega_body += composed.full_bg;
+        } else {
+            composed.full_bg = initial_alignment_.bg0;
+            composed.full_omega_body += composed.full_bg;
+        }
+        if (const auto delta_ba = EvaluateNodeValueAtTime(time, delta_ba_nodes_)) {
+            composed.full_ba = initial_alignment_.ba0 + *delta_ba;
+        } else {
+            composed.full_ba = initial_alignment_.ba0;
+        }
+        return composed;
     }
 
     if (control_points_.empty()) {
@@ -1266,6 +1700,25 @@ bool System::SaveOutputs() const {
                        << q.x() << ' ' << q.y() << ' ' << q.z() << ' ' << q.w() << '\n';
     }
 
+    const std::filesystem::path dense_trajectory_path = config_.output_path / "dense_trajectory_enu.txt";
+    std::ofstream dense_trajectory_ofs(dense_trajectory_path);
+    dense_trajectory_ofs << "# time_s east_m north_m up_m qx qy qz qw\n";
+    const double dense_dt = config_.output_query_dt_s > 0.0
+        ? config_.output_query_dt_s
+        : (config_.imu_main.rate_hz > 0.0 ? 1.0 / config_.imu_main.rate_hz : 0.0);
+    if (dense_dt > 0.0 && config_.end_time > config_.start_time) {
+        for (double query_time = config_.start_time; query_time <= config_.end_time + 1.0e-9; query_time += dense_dt) {
+            const auto composed = EvaluateComposedState(query_time);
+            if (!composed) {
+                continue;
+            }
+            const Eigen::Quaterniond q = QnbNedToQebEnu(Eigen::Quaterniond(composed->full_pose.so3().matrix()));
+            const Vector3d t = NedToEnu(composed->full_pose.translation());
+            dense_trajectory_ofs << query_time << ' ' << t.x() << ' ' << t.y() << ' ' << t.z() << ' '
+                                 << q.x() << ' ' << q.y() << ' ' << q.z() << ' ' << q.w() << '\n';
+        }
+    }
+
     const std::filesystem::path bias_path = config_.output_path / "bias_nodes.txt";
     std::ofstream bias_ofs(bias_path);
     bias_ofs << "# time_s d_bgx d_bgy d_bgz d_bax d_bay d_baz\n";
@@ -1275,6 +1728,15 @@ bool System::SaveOutputs() const {
                  << delta_ba_nodes_[i].x() << ' ' << delta_ba_nodes_[i].y() << ' ' << delta_ba_nodes_[i].z() << '\n';
     }
 
+    if (config_.enable_vertical_profile_field && delta_z_nodes_.size() == control_points_.size()) {
+        const std::filesystem::path vertical_profile_path = config_.output_path / "vertical_profile_nodes.txt";
+        std::ofstream vertical_profile_ofs(vertical_profile_path);
+        vertical_profile_ofs << "# time_s delta_z_m\n";
+        for (size_t i = 0; i < control_points_.size(); ++i) {
+            vertical_profile_ofs << control_points_[i].Timestamp() << ' ' << delta_z_nodes_[i] << '\n';
+        }
+    }
+
     const std::filesystem::path summary_path = config_.output_path / "run_summary.txt";
     std::ofstream summary_ofs(summary_path);
     summary_ofs << std::setprecision(17);
@@ -1282,6 +1744,12 @@ bool System::SaveOutputs() const {
     summary_ofs << "imu_file: " << config_.imu_main.file << '\n';
     summary_ofs << "use_gnss_factors: " << config_.use_gnss_factors << '\n';
     summary_ofs << "use_imu_factors: " << config_.use_imu_factors << '\n';
+    summary_ofs << "enable_vertical_profile_field: " << config_.enable_vertical_profile_field << '\n';
+    summary_ofs << "vertical_gnss_sigma_m: " << config_.vertical_gnss_sigma_m << '\n';
+    summary_ofs << "vertical_gnss_cauchy_scale_m: " << config_.vertical_gnss_cauchy_scale_m << '\n';
+    summary_ofs << "vertical_smooth_sigma_m: " << config_.vertical_smooth_sigma_m << '\n';
+    summary_ofs << "vertical_prior_sigma_m: " << config_.vertical_prior_sigma_m << '\n';
+    summary_ofs << "output_query_dt_s: " << config_.output_query_dt_s << '\n';
     summary_ofs << "gnss_count: " << gnss_.size() << '\n';
     summary_ofs << "imu_count: " << imu_.size() << '\n';
     summary_ofs << "control_point_count: " << control_points_.size() << '\n';

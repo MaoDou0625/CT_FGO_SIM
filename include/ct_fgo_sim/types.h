@@ -26,6 +26,12 @@ struct ImuMeasurement {
     Vector3d dvel = Vector3d::Zero();
 };
 
+struct NhcMeasurement {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    double time = 0.0;
+    Vector3d vel_body_mps = Vector3d::Zero();
+};
+
 struct Pose {
     Matrix3d R = Matrix3d::Identity();
     Vector3d t = Vector3d::Zero();
@@ -33,5 +39,6 @@ struct Pose {
 
 using GnssMeasurementArray = std::vector<GnssMeasurement, Eigen::aligned_allocator<GnssMeasurement>>;
 using ImuMeasurementArray = std::vector<ImuMeasurement, Eigen::aligned_allocator<ImuMeasurement>>;
+using NhcMeasurementArray = std::vector<NhcMeasurement, Eigen::aligned_allocator<NhcMeasurement>>;
 
 }  // namespace ct_fgo_sim
