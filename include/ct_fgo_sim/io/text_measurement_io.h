@@ -80,4 +80,29 @@ inline ImuMeasurementArray LoadImuFile(const std::filesystem::path& path, bool v
     return rows;
 }
 
+inline NhcMeasurementArray LoadNhcFile(const std::filesystem::path& path) {
+    std::ifstream ifs(path);
+    NhcMeasurementArray rows;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        const auto values = ParseNumericRow(line);
+        if (values.size() < 3) {
+            continue;
+        }
+        NhcMeasurement meas;
+        meas.time = values[0];
+        if (values.size() == 3) {
+            // time_s vy_mps vz_mps
+            meas.vel_body_mps = Vector3d(0.0, values[1], values[2]);
+        } else if (values.size() >= 4) {
+            // time_s vx_mps vy_mps vz_mps
+            meas.vel_body_mps = Vector3d(values[1], values[2], values[3]);
+        } else {
+            meas.vel_body_mps = Vector3d::Zero();
+        }
+        rows.push_back(meas);
+    }
+    return rows;
+}
+
 }  // namespace ct_fgo_sim::io

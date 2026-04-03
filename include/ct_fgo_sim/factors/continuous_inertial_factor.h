@@ -101,7 +101,7 @@ private:
     };
 
     template <typename T>
-    NavInfo<T> EvaluateNavInfo(const Eigen::Matrix<T, 3, 1>& p_enu, const Eigen::Matrix<T, 3, 1>& v_world) const {
+    NavInfo<T> EvaluateNavInfo(const Eigen::Matrix<T, 3, 1>& p_ned, const Eigen::Matrix<T, 3, 1>& v_ned) const {
         constexpr double kRa = 6378137.0;
         constexpr double kE1 = 0.0066943799901413156;
         constexpr double kWie = 7.2921151467e-5;
@@ -114,8 +114,8 @@ private:
         const T rn0 = T(kRa) / sqrt_den0;
         const T rm0 = T(kRa * (1.0 - kE1)) / (den0 * sqrt_den0);
 
-        const T lat = lat0 + p_enu.y() / (rm0 + h0);
-        const T h = h0 + p_enu.z();
+        const T lat = lat0 + p_ned.x() / (rm0 + h0);
+        const T h = h0 - p_ned.z();
         const T sin_lat = ceres::sin(lat);
         const T den = T(1.0) - T(kE1) * sin_lat * sin_lat;
         const T sqrt_den = ceres::sqrt(den);
@@ -127,12 +127,12 @@ private:
         const T gravity = T(9.7803267715) * (T(1.0) + T(0.0052790414) * sin2 + T(0.0000232718) * sin2 * sin2) +
                           h * (T(0.0000000043977311) * sin2 - T(0.0000030876910891)) +
                           T(0.0000000000007211) * h * h;
-        out.gravity_n = Eigen::Matrix<T, 3, 1>(T(0), T(0), -gravity);
+        out.gravity_n = Eigen::Matrix<T, 3, 1>(T(0), T(0), gravity);
         out.omega_ie_n = Eigen::Matrix<T, 3, 1>(T(kWie) * ceres::cos(lat), T(0), -T(kWie) * sin_lat);
         out.omega_en_n = Eigen::Matrix<T, 3, 1>(
-            -v_world.y() / (rm + h),
-             v_world.x() / (rn + h),
-             v_world.x() * ceres::tan(lat) / (rn + h));
+             v_ned.y() / (rn + h),
+            -v_ned.x() / (rm + h),
+            -v_ned.y() * ceres::tan(lat) / (rn + h));
         return out;
     }
 

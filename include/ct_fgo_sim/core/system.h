@@ -24,6 +24,7 @@ struct ImuConfig {
 struct BodyFrameConfig {
     Eigen::Quaterniond q_body_imu = Eigen::Quaterniond::Identity();
     double q_body_imu_prior_sigma_rad = 0.1;
+    std::string nhc_file;
     bool enable_nhc = false;
     bool estimate_q_body_imu = true;
     bool nhc_enable_vx = false;
@@ -64,6 +65,8 @@ struct AppConfig {
     int solver_max_iterations = 20;
     bool use_gnss_factors = true;
     bool use_imu_factors = true;
+    double output_query_dt_s = 0.0;
+    bool use_direct_spline_state = false;
     bool use_explicit_init_state = false;
     Vector3d init_pos_blh = Vector3d::Zero();
     Vector3d init_vel_ned = Vector3d::Zero();
@@ -121,6 +124,7 @@ private:
     AppConfig config_;
     GnssMeasurementArray gnss_;
     ImuMeasurementArray imu_;
+    NhcMeasurementArray nhc_;
     spline::ControlPointArray control_points_;
     AlignedVec3Array delta_theta_nodes_;
     AlignedVec3Array delta_vel_nodes_;
