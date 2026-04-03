@@ -72,6 +72,8 @@ struct AppConfig {
     double road_profile_residual_curvature_sigma_m = 0.003;
     double road_profile_residual_zero_sigma_m = 0.01;
     double road_profile_residual_mean_sigma_m = 0.003;
+    double road_profile_residual_band_window_m = 2.0;
+    double road_profile_residual_band_sigma_m = 0.001;
     double imu_sigma_accel_mps2 = 0.2;
     double imu_sigma_gyro_rps = 0.01;
     double gyro_bias_rw_sigma = 1.0e-4;
