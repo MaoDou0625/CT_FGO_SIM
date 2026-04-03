@@ -492,6 +492,9 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     if (cfg["road_profile_residual_zero_sigma_m"]) {
         config_.road_profile_residual_zero_sigma_m = cfg["road_profile_residual_zero_sigma_m"].as<double>();
     }
+    if (cfg["road_profile_residual_mean_sigma_m"]) {
+        config_.road_profile_residual_mean_sigma_m = cfg["road_profile_residual_mean_sigma_m"].as<double>();
+    }
     if (cfg["imu_sigma_accel_mps2"]) {
         config_.imu_sigma_accel_mps2 = cfg["imu_sigma_accel_mps2"].as<double>();
     }
@@ -761,6 +764,7 @@ void System::Describe() const {
     LOG(INFO) << "Road profile residual prior sigma (m): " << config_.road_profile_residual_prior_sigma_m;
     LOG(INFO) << "Road profile residual curvature sigma (m): " << config_.road_profile_residual_curvature_sigma_m;
     LOG(INFO) << "Road profile residual zero sigma (m): " << config_.road_profile_residual_zero_sigma_m;
+    LOG(INFO) << "Road profile residual mean sigma (m): " << config_.road_profile_residual_mean_sigma_m;
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
     LOG(INFO) << "IMU stride: " << config_.imu_stride;
     LOG(INFO) << "Outer iterations: " << config_.outer_iterations;
@@ -1115,6 +1119,7 @@ bool System::BuildAndSolveProblem() {
         int road_profile_residual_smoothness_factor_count = 0;
         int road_profile_residual_curvature_factor_count = 0;
         int road_profile_residual_zero_factor_count = 0;
+        int road_profile_residual_mean_factor_count = 0;
         if (config_.enable_road_profile_state && !nominal_nav_.empty() &&
             nominal_distance_s_.size() == nominal_nav_.size()) {
             std::vector<double> nav_times;
@@ -1220,6 +1225,28 @@ bool System::BuildAndSolveProblem() {
                         &residual_h);
                     ++road_profile_residual_zero_factor_count;
                 }
+                for (size_t base_i = 0; base_i + 1 < road_profile_base_s_nodes_.size(); ++base_i) {
+                    const double s0 = road_profile_base_s_nodes_[base_i];
+                    const double s1 = road_profile_base_s_nodes_[base_i + 1];
+                    std::vector<double*> residual_blocks;
+                    for (size_t residual_i = 0; residual_i < road_profile_residual_s_nodes_.size(); ++residual_i) {
+                        const double sr = road_profile_residual_s_nodes_[residual_i];
+                        const bool inside = (sr + 1.0e-9 >= s0) &&
+                                            ((sr <= s1 + 1.0e-9) || (base_i + 2 == road_profile_base_s_nodes_.size()));
+                        if (inside) {
+                            residual_blocks.push_back(&road_profile_residual_h_nodes_[residual_i]);
+                        }
+                    }
+                    if (residual_blocks.empty()) {
+                        continue;
+                    }
+                    ceres::CostFunction* mean_cost =
+                        factors::RoadProfileSegmentMeanFactor::Create(
+                            static_cast<int>(residual_blocks.size()),
+                            config_.road_profile_residual_mean_sigma_m);
+                    problem.AddResidualBlock(mean_cost, nullptr, residual_blocks);
+                    ++road_profile_residual_mean_factor_count;
+                }
             } else if (road_profile_h_nodes_.size() >= 2 &&
                        road_profile_h_nodes_.size() == road_profile_s_nodes_.size()) {
                 for (auto& road_h : road_profile_h_nodes_) {
@@ -1297,6 +1324,7 @@ bool System::BuildAndSolveProblem() {
         LOG(INFO) << "Road-profile residual smoothness factors: " << road_profile_residual_smoothness_factor_count;
         LOG(INFO) << "Road-profile residual curvature factors: " << road_profile_residual_curvature_factor_count;
         LOG(INFO) << "Road-profile residual zero factors: " << road_profile_residual_zero_factor_count;
+        LOG(INFO) << "Road-profile residual segment-mean factors: " << road_profile_residual_mean_factor_count;
         LOG(INFO) << "Direct spline inertial factors: " << inertial_factor_count;
         LOG(INFO) << "Bias random-walk factors: " << bias_rw_factor_count;
         LOG(INFO) << summary.BriefReport();
@@ -2214,6 +2242,7 @@ bool System::SaveOutputs() const {
     summary_ofs << "road_profile_residual_prior_sigma_m: " << config_.road_profile_residual_prior_sigma_m << '\n';
     summary_ofs << "road_profile_residual_curvature_sigma_m: " << config_.road_profile_residual_curvature_sigma_m << '\n';
     summary_ofs << "road_profile_residual_zero_sigma_m: " << config_.road_profile_residual_zero_sigma_m << '\n';
+    summary_ofs << "road_profile_residual_mean_sigma_m: " << config_.road_profile_residual_mean_sigma_m << '\n';
     summary_ofs << "output_query_dt_s: " << config_.output_query_dt_s << '\n';
     summary_ofs << "gnss_count: " << gnss_.size() << '\n';
     summary_ofs << "imu_count: " << imu_.size() << '\n';

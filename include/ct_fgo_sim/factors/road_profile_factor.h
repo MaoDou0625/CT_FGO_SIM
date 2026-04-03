@@ -147,4 +147,35 @@ private:
     double inv_sigma_;
 };
 
+struct RoadProfileSegmentMeanFactor {
+    explicit RoadProfileSegmentMeanFactor(double sigma_m)
+        : inv_sigma_(1.0 / std::max(1.0e-6, sigma_m)) {}
+
+    template <typename T>
+    bool operator()(T const* const* hs, T* residuals) const {
+        T mean = T(0.0);
+        for (int i = 0; i < parameter_count_; ++i) {
+            mean += hs[i][0];
+        }
+        mean /= T(static_cast<double>(std::max(1, parameter_count_)));
+        residuals[0] = T(inv_sigma_) * mean;
+        return true;
+    }
+
+    static ceres::CostFunction* Create(int parameter_count, double sigma_m) {
+        auto* functor = new RoadProfileSegmentMeanFactor(sigma_m);
+        functor->parameter_count_ = std::max(1, parameter_count);
+        auto* cost = new ceres::DynamicAutoDiffCostFunction<RoadProfileSegmentMeanFactor, 4>(functor);
+        for (int i = 0; i < functor->parameter_count_; ++i) {
+            cost->AddParameterBlock(1);
+        }
+        cost->SetNumResiduals(1);
+        return cost;
+    }
+
+private:
+    double inv_sigma_;
+    int parameter_count_ = 1;
+};
+
 }  // namespace ct_fgo_sim::factors
