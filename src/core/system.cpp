@@ -453,8 +453,14 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     if (cfg["road_profile_prior_sigma_m"]) {
         config_.road_profile_prior_sigma_m = cfg["road_profile_prior_sigma_m"].as<double>();
     }
+    if (cfg["road_profile_curvature_sigma_m"]) {
+        config_.road_profile_curvature_sigma_m = cfg["road_profile_curvature_sigma_m"].as<double>();
+    }
     if (cfg["road_profile_anchor_sigma_m"]) {
         config_.road_profile_anchor_sigma_m = cfg["road_profile_anchor_sigma_m"].as<double>();
+    }
+    if (cfg["road_profile_anchor_spacing_m"]) {
+        config_.road_profile_anchor_spacing_m = cfg["road_profile_anchor_spacing_m"].as<double>();
     }
     if (cfg["imu_sigma_accel_mps2"]) {
         config_.imu_sigma_accel_mps2 = cfg["imu_sigma_accel_mps2"].as<double>();
@@ -712,7 +718,9 @@ void System::Describe() const {
     LOG(INFO) << "Enable road profile state: " << (config_.enable_road_profile_state ? "true" : "false");
     LOG(INFO) << "Road profile ds (m): " << config_.road_profile_ds_m;
     LOG(INFO) << "Road profile prior sigma (m): " << config_.road_profile_prior_sigma_m;
+    LOG(INFO) << "Road profile curvature sigma (m): " << config_.road_profile_curvature_sigma_m;
     LOG(INFO) << "Road profile anchor sigma (m): " << config_.road_profile_anchor_sigma_m;
+    LOG(INFO) << "Road profile anchor spacing (m): " << config_.road_profile_anchor_spacing_m;
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
     LOG(INFO) << "IMU stride: " << config_.imu_stride;
     LOG(INFO) << "Outer iterations: " << config_.outer_iterations;
@@ -1062,6 +1070,7 @@ bool System::BuildAndSolveProblem() {
 
         int road_profile_gnss_factor_count = 0;
         int road_profile_smoothness_factor_count = 0;
+        int road_profile_curvature_factor_count = 0;
         int road_profile_anchor_factor_count = 0;
         if (config_.enable_road_profile_state && road_profile_h_nodes_.size() >= 2 &&
             road_profile_h_nodes_.size() == road_profile_s_nodes_.size() &&
@@ -1103,13 +1112,28 @@ bool System::BuildAndSolveProblem() {
                     &road_profile_h_nodes_[i + 1]);
                 ++road_profile_smoothness_factor_count;
             }
+            for (int i = 1; i + 1 < static_cast<int>(road_profile_h_nodes_.size()); ++i) {
+                problem.AddResidualBlock(
+                    factors::RoadProfileCurvatureFactor::Create(config_.road_profile_curvature_sigma_m),
+                    nullptr,
+                    &road_profile_h_nodes_[i - 1],
+                    &road_profile_h_nodes_[i],
+                    &road_profile_h_nodes_[i + 1]);
+                ++road_profile_curvature_factor_count;
+            }
+            const double anchor_spacing = std::max(config_.road_profile_ds_m, config_.road_profile_anchor_spacing_m);
+            double next_anchor_s = anchor_spacing;
             for (size_t i = 1; i < road_profile_h_nodes_.size(); ++i) {
+                if (road_profile_s_nodes_[i] + 1.0e-9 < next_anchor_s && i + 1 < road_profile_h_nodes_.size()) {
+                    continue;
+                }
                 const double ref_h = road_profile_h_nodes_[i];
                 problem.AddResidualBlock(
                     factors::RoadProfileAnchorFactor::Create(ref_h, config_.road_profile_anchor_sigma_m),
                     nullptr,
                     &road_profile_h_nodes_[i]);
                 ++road_profile_anchor_factor_count;
+                next_anchor_s += anchor_spacing;
             }
         }
 
@@ -1129,6 +1153,7 @@ bool System::BuildAndSolveProblem() {
         LOG(INFO) << "Vertical prior factors: " << vertical_prior_factor_count;
         LOG(INFO) << "Road-profile GNSS factors: " << road_profile_gnss_factor_count;
         LOG(INFO) << "Road-profile smoothness factors: " << road_profile_smoothness_factor_count;
+        LOG(INFO) << "Road-profile curvature factors: " << road_profile_curvature_factor_count;
         LOG(INFO) << "Road-profile anchor factors: " << road_profile_anchor_factor_count;
         LOG(INFO) << "Direct spline inertial factors: " << inertial_factor_count;
         LOG(INFO) << "Bias random-walk factors: " << bias_rw_factor_count;
@@ -1957,7 +1982,9 @@ bool System::SaveOutputs() const {
     summary_ofs << "enable_road_profile_state: " << config_.enable_road_profile_state << '\n';
     summary_ofs << "road_profile_ds_m: " << config_.road_profile_ds_m << '\n';
     summary_ofs << "road_profile_prior_sigma_m: " << config_.road_profile_prior_sigma_m << '\n';
+    summary_ofs << "road_profile_curvature_sigma_m: " << config_.road_profile_curvature_sigma_m << '\n';
     summary_ofs << "road_profile_anchor_sigma_m: " << config_.road_profile_anchor_sigma_m << '\n';
+    summary_ofs << "road_profile_anchor_spacing_m: " << config_.road_profile_anchor_spacing_m << '\n';
     summary_ofs << "output_query_dt_s: " << config_.output_query_dt_s << '\n';
     summary_ofs << "gnss_count: " << gnss_.size() << '\n';
     summary_ofs << "imu_count: " << imu_.size() << '\n';

@@ -68,4 +68,23 @@ private:
     double inv_sigma_;
 };
 
+struct RoadProfileCurvatureFactor {
+    explicit RoadProfileCurvatureFactor(double sigma_m)
+        : inv_sigma_(1.0 / std::max(1.0e-6, sigma_m)) {}
+
+    template <typename T>
+    bool operator()(const T* const him1, const T* const hi, const T* const hip1, T* residuals) const {
+        residuals[0] = T(inv_sigma_) * (hip1[0] - T(2.0) * hi[0] + him1[0]);
+        return true;
+    }
+
+    static ceres::CostFunction* Create(double sigma_m) {
+        return new ceres::AutoDiffCostFunction<RoadProfileCurvatureFactor, 1, 1, 1, 1>(
+            new RoadProfileCurvatureFactor(sigma_m));
+    }
+
+private:
+    double inv_sigma_;
+};
+
 }  // namespace ct_fgo_sim::factors

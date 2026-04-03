@@ -58,7 +58,9 @@ struct AppConfig {
     bool enable_road_profile_state = false;
     double road_profile_ds_m = 0.25;
     double road_profile_prior_sigma_m = 0.01;
+    double road_profile_curvature_sigma_m = 0.01;
     double road_profile_anchor_sigma_m = 0.05;
+    double road_profile_anchor_spacing_m = 5.0;
     double imu_sigma_accel_mps2 = 0.2;
     double imu_sigma_gyro_rps = 0.01;
     double gyro_bias_rw_sigma = 1.0e-4;
