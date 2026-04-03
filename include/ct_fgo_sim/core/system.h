@@ -61,6 +61,16 @@ struct AppConfig {
     double road_profile_curvature_sigma_m = 0.01;
     double road_profile_anchor_sigma_m = 0.05;
     double road_profile_anchor_spacing_m = 5.0;
+    bool road_profile_enable_dual_layer = false;
+    double road_profile_base_ds_m = 1.0;
+    double road_profile_base_prior_sigma_m = 0.01;
+    double road_profile_base_curvature_sigma_m = 0.01;
+    double road_profile_base_anchor_sigma_m = 0.05;
+    double road_profile_base_anchor_spacing_m = 5.0;
+    double road_profile_residual_ds_m = 0.25;
+    double road_profile_residual_prior_sigma_m = 0.003;
+    double road_profile_residual_curvature_sigma_m = 0.003;
+    double road_profile_residual_zero_sigma_m = 0.01;
     double imu_sigma_accel_mps2 = 0.2;
     double imu_sigma_gyro_rps = 0.01;
     double gyro_bias_rw_sigma = 1.0e-4;
@@ -125,6 +135,7 @@ private:
     bool ApplyInitialYawFeedbackFromGnss();
     bool InjectCurrentErrorStateIntoNominalTrajectory();
     void ResetRoadProfileNodesFromNominalTrajectory();
+    double EvaluateRoadProfileHeightAtDistance(double s_query) const;
     std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
     std::optional<Vector3d> EvaluateNominalAccelAtTime(double time) const;
     std::optional<Vector3d> EvaluateNodeValueAtTime(
@@ -158,6 +169,10 @@ private:
     std::vector<double> nominal_distance_s_;
     std::vector<double> road_profile_s_nodes_;
     std::vector<double> road_profile_h_nodes_;
+    std::vector<double> road_profile_base_s_nodes_;
+    std::vector<double> road_profile_base_h_nodes_;
+    std::vector<double> road_profile_residual_s_nodes_;
+    std::vector<double> road_profile_residual_h_nodes_;
     bool initial_yaw_feedback_applied_ = false;
     double initial_yaw_feedback_total_rad_ = 0.0;
 };

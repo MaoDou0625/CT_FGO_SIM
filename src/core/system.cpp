@@ -462,6 +462,36 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     if (cfg["road_profile_anchor_spacing_m"]) {
         config_.road_profile_anchor_spacing_m = cfg["road_profile_anchor_spacing_m"].as<double>();
     }
+    if (cfg["road_profile_enable_dual_layer"]) {
+        config_.road_profile_enable_dual_layer = cfg["road_profile_enable_dual_layer"].as<bool>();
+    }
+    if (cfg["road_profile_base_ds_m"]) {
+        config_.road_profile_base_ds_m = cfg["road_profile_base_ds_m"].as<double>();
+    }
+    if (cfg["road_profile_base_prior_sigma_m"]) {
+        config_.road_profile_base_prior_sigma_m = cfg["road_profile_base_prior_sigma_m"].as<double>();
+    }
+    if (cfg["road_profile_base_curvature_sigma_m"]) {
+        config_.road_profile_base_curvature_sigma_m = cfg["road_profile_base_curvature_sigma_m"].as<double>();
+    }
+    if (cfg["road_profile_base_anchor_sigma_m"]) {
+        config_.road_profile_base_anchor_sigma_m = cfg["road_profile_base_anchor_sigma_m"].as<double>();
+    }
+    if (cfg["road_profile_base_anchor_spacing_m"]) {
+        config_.road_profile_base_anchor_spacing_m = cfg["road_profile_base_anchor_spacing_m"].as<double>();
+    }
+    if (cfg["road_profile_residual_ds_m"]) {
+        config_.road_profile_residual_ds_m = cfg["road_profile_residual_ds_m"].as<double>();
+    }
+    if (cfg["road_profile_residual_prior_sigma_m"]) {
+        config_.road_profile_residual_prior_sigma_m = cfg["road_profile_residual_prior_sigma_m"].as<double>();
+    }
+    if (cfg["road_profile_residual_curvature_sigma_m"]) {
+        config_.road_profile_residual_curvature_sigma_m = cfg["road_profile_residual_curvature_sigma_m"].as<double>();
+    }
+    if (cfg["road_profile_residual_zero_sigma_m"]) {
+        config_.road_profile_residual_zero_sigma_m = cfg["road_profile_residual_zero_sigma_m"].as<double>();
+    }
     if (cfg["imu_sigma_accel_mps2"]) {
         config_.imu_sigma_accel_mps2 = cfg["imu_sigma_accel_mps2"].as<double>();
     }
@@ -721,6 +751,16 @@ void System::Describe() const {
     LOG(INFO) << "Road profile curvature sigma (m): " << config_.road_profile_curvature_sigma_m;
     LOG(INFO) << "Road profile anchor sigma (m): " << config_.road_profile_anchor_sigma_m;
     LOG(INFO) << "Road profile anchor spacing (m): " << config_.road_profile_anchor_spacing_m;
+    LOG(INFO) << "Road profile dual-layer: " << (config_.road_profile_enable_dual_layer ? "true" : "false");
+    LOG(INFO) << "Road profile base ds (m): " << config_.road_profile_base_ds_m;
+    LOG(INFO) << "Road profile base prior sigma (m): " << config_.road_profile_base_prior_sigma_m;
+    LOG(INFO) << "Road profile base curvature sigma (m): " << config_.road_profile_base_curvature_sigma_m;
+    LOG(INFO) << "Road profile base anchor sigma (m): " << config_.road_profile_base_anchor_sigma_m;
+    LOG(INFO) << "Road profile base anchor spacing (m): " << config_.road_profile_base_anchor_spacing_m;
+    LOG(INFO) << "Road profile residual ds (m): " << config_.road_profile_residual_ds_m;
+    LOG(INFO) << "Road profile residual prior sigma (m): " << config_.road_profile_residual_prior_sigma_m;
+    LOG(INFO) << "Road profile residual curvature sigma (m): " << config_.road_profile_residual_curvature_sigma_m;
+    LOG(INFO) << "Road profile residual zero sigma (m): " << config_.road_profile_residual_zero_sigma_m;
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
     LOG(INFO) << "IMU stride: " << config_.imu_stride;
     LOG(INFO) << "Outer iterations: " << config_.outer_iterations;
@@ -1069,71 +1109,170 @@ bool System::BuildAndSolveProblem() {
         }
 
         int road_profile_gnss_factor_count = 0;
-        int road_profile_smoothness_factor_count = 0;
-        int road_profile_curvature_factor_count = 0;
-        int road_profile_anchor_factor_count = 0;
-        if (config_.enable_road_profile_state && road_profile_h_nodes_.size() >= 2 &&
-            road_profile_h_nodes_.size() == road_profile_s_nodes_.size() &&
-            !nominal_nav_.empty() && nominal_distance_s_.size() == nominal_nav_.size()) {
+        int road_profile_base_smoothness_factor_count = 0;
+        int road_profile_base_curvature_factor_count = 0;
+        int road_profile_base_anchor_factor_count = 0;
+        int road_profile_residual_smoothness_factor_count = 0;
+        int road_profile_residual_curvature_factor_count = 0;
+        int road_profile_residual_zero_factor_count = 0;
+        if (config_.enable_road_profile_state && !nominal_nav_.empty() &&
+            nominal_distance_s_.size() == nominal_nav_.size()) {
             std::vector<double> nav_times;
             nav_times.reserve(nominal_nav_.size());
             for (const auto& nav : nominal_nav_) {
                 nav_times.push_back(nav.time);
             }
 
-            for (auto& road_h : road_profile_h_nodes_) {
-                problem.AddParameterBlock(&road_h, 1);
-            }
-            problem.SetParameterBlockConstant(&road_profile_h_nodes_.front());
-
             const double profile_sigma = config_.vertical_gnss_sigma_m > 0.0
                 ? config_.vertical_gnss_sigma_m
                 : config_.gnss_sigma_vertical_m;
-            for (const auto& gnss : gnss_) {
-                const double s_query = InterpolateScalarSeries(gnss.time, nav_times, nominal_distance_s_);
-                int start = -1;
-                double u = 0.0;
-                if (!FindScalarSeriesInterval(s_query, road_profile_s_nodes_, start, u)) {
-                    continue;
+            const bool use_dual_layer =
+                config_.road_profile_enable_dual_layer &&
+                road_profile_base_h_nodes_.size() >= 2 &&
+                road_profile_base_h_nodes_.size() == road_profile_base_s_nodes_.size() &&
+                road_profile_residual_h_nodes_.size() >= 2 &&
+                road_profile_residual_h_nodes_.size() == road_profile_residual_s_nodes_.size();
+
+            if (use_dual_layer) {
+                for (auto& road_h : road_profile_base_h_nodes_) {
+                    problem.AddParameterBlock(&road_h, 1);
                 }
-                const Vector3d meas_pos_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
-                problem.AddResidualBlock(
-                    factors::RoadProfileGnssFactor::Create(u, meas_pos_ned.z(), profile_sigma),
-                    nullptr,
-                    &road_profile_h_nodes_[start],
-                    &road_profile_h_nodes_[start + 1]);
-                ++road_profile_gnss_factor_count;
-            }
-            for (int i = 0; i + 1 < static_cast<int>(road_profile_h_nodes_.size()); ++i) {
-                problem.AddResidualBlock(
-                    factors::RoadProfileSmoothnessFactor::Create(config_.road_profile_prior_sigma_m),
-                    nullptr,
-                    &road_profile_h_nodes_[i],
-                    &road_profile_h_nodes_[i + 1]);
-                ++road_profile_smoothness_factor_count;
-            }
-            for (int i = 1; i + 1 < static_cast<int>(road_profile_h_nodes_.size()); ++i) {
-                problem.AddResidualBlock(
-                    factors::RoadProfileCurvatureFactor::Create(config_.road_profile_curvature_sigma_m),
-                    nullptr,
-                    &road_profile_h_nodes_[i - 1],
-                    &road_profile_h_nodes_[i],
-                    &road_profile_h_nodes_[i + 1]);
-                ++road_profile_curvature_factor_count;
-            }
-            const double anchor_spacing = std::max(config_.road_profile_ds_m, config_.road_profile_anchor_spacing_m);
-            double next_anchor_s = anchor_spacing;
-            for (size_t i = 1; i < road_profile_h_nodes_.size(); ++i) {
-                if (road_profile_s_nodes_[i] + 1.0e-9 < next_anchor_s && i + 1 < road_profile_h_nodes_.size()) {
-                    continue;
+                for (auto& road_h : road_profile_residual_h_nodes_) {
+                    problem.AddParameterBlock(&road_h, 1);
                 }
-                const double ref_h = road_profile_h_nodes_[i];
-                problem.AddResidualBlock(
-                    factors::RoadProfileAnchorFactor::Create(ref_h, config_.road_profile_anchor_sigma_m),
-                    nullptr,
-                    &road_profile_h_nodes_[i]);
-                ++road_profile_anchor_factor_count;
-                next_anchor_s += anchor_spacing;
+                problem.SetParameterBlockConstant(&road_profile_base_h_nodes_.front());
+
+                for (const auto& gnss : gnss_) {
+                    const double s_query = InterpolateScalarSeries(gnss.time, nav_times, nominal_distance_s_);
+                    int base_start = -1;
+                    int residual_start = -1;
+                    double base_u = 0.0;
+                    double residual_u = 0.0;
+                    if (!FindScalarSeriesInterval(s_query, road_profile_base_s_nodes_, base_start, base_u) ||
+                        !FindScalarSeriesInterval(s_query, road_profile_residual_s_nodes_, residual_start, residual_u)) {
+                        continue;
+                    }
+                    const Vector3d meas_pos_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
+                    problem.AddResidualBlock(
+                        factors::DualRoadProfileGnssFactor::Create(base_u, residual_u, meas_pos_ned.z(), profile_sigma),
+                        nullptr,
+                        &road_profile_base_h_nodes_[base_start],
+                        &road_profile_base_h_nodes_[base_start + 1],
+                        &road_profile_residual_h_nodes_[residual_start],
+                        &road_profile_residual_h_nodes_[residual_start + 1]);
+                    ++road_profile_gnss_factor_count;
+                }
+                for (int i = 0; i + 1 < static_cast<int>(road_profile_base_h_nodes_.size()); ++i) {
+                    problem.AddResidualBlock(
+                        factors::RoadProfileSmoothnessFactor::Create(config_.road_profile_base_prior_sigma_m),
+                        nullptr,
+                        &road_profile_base_h_nodes_[i],
+                        &road_profile_base_h_nodes_[i + 1]);
+                    ++road_profile_base_smoothness_factor_count;
+                }
+                for (int i = 1; i + 1 < static_cast<int>(road_profile_base_h_nodes_.size()); ++i) {
+                    problem.AddResidualBlock(
+                        factors::RoadProfileCurvatureFactor::Create(config_.road_profile_base_curvature_sigma_m),
+                        nullptr,
+                        &road_profile_base_h_nodes_[i - 1],
+                        &road_profile_base_h_nodes_[i],
+                        &road_profile_base_h_nodes_[i + 1]);
+                    ++road_profile_base_curvature_factor_count;
+                }
+                const double base_anchor_spacing = std::max(
+                    config_.road_profile_base_ds_m,
+                    config_.road_profile_base_anchor_spacing_m);
+                double next_base_anchor_s = base_anchor_spacing;
+                for (size_t i = 1; i < road_profile_base_h_nodes_.size(); ++i) {
+                    if (road_profile_base_s_nodes_[i] + 1.0e-9 < next_base_anchor_s &&
+                        i + 1 < road_profile_base_h_nodes_.size()) {
+                        continue;
+                    }
+                    const double ref_h = road_profile_base_h_nodes_[i];
+                    problem.AddResidualBlock(
+                        factors::RoadProfileAnchorFactor::Create(ref_h, config_.road_profile_base_anchor_sigma_m),
+                        nullptr,
+                        &road_profile_base_h_nodes_[i]);
+                    ++road_profile_base_anchor_factor_count;
+                    next_base_anchor_s += base_anchor_spacing;
+                }
+                for (int i = 0; i + 1 < static_cast<int>(road_profile_residual_h_nodes_.size()); ++i) {
+                    problem.AddResidualBlock(
+                        factors::RoadProfileSmoothnessFactor::Create(config_.road_profile_residual_prior_sigma_m),
+                        nullptr,
+                        &road_profile_residual_h_nodes_[i],
+                        &road_profile_residual_h_nodes_[i + 1]);
+                    ++road_profile_residual_smoothness_factor_count;
+                }
+                for (int i = 1; i + 1 < static_cast<int>(road_profile_residual_h_nodes_.size()); ++i) {
+                    problem.AddResidualBlock(
+                        factors::RoadProfileCurvatureFactor::Create(config_.road_profile_residual_curvature_sigma_m),
+                        nullptr,
+                        &road_profile_residual_h_nodes_[i - 1],
+                        &road_profile_residual_h_nodes_[i],
+                        &road_profile_residual_h_nodes_[i + 1]);
+                    ++road_profile_residual_curvature_factor_count;
+                }
+                for (auto& residual_h : road_profile_residual_h_nodes_) {
+                    problem.AddResidualBlock(
+                        factors::RoadProfileZeroFactor::Create(config_.road_profile_residual_zero_sigma_m),
+                        nullptr,
+                        &residual_h);
+                    ++road_profile_residual_zero_factor_count;
+                }
+            } else if (road_profile_h_nodes_.size() >= 2 &&
+                       road_profile_h_nodes_.size() == road_profile_s_nodes_.size()) {
+                for (auto& road_h : road_profile_h_nodes_) {
+                    problem.AddParameterBlock(&road_h, 1);
+                }
+                problem.SetParameterBlockConstant(&road_profile_h_nodes_.front());
+
+                for (const auto& gnss : gnss_) {
+                    const double s_query = InterpolateScalarSeries(gnss.time, nav_times, nominal_distance_s_);
+                    int start = -1;
+                    double u = 0.0;
+                    if (!FindScalarSeriesInterval(s_query, road_profile_s_nodes_, start, u)) {
+                        continue;
+                    }
+                    const Vector3d meas_pos_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
+                    problem.AddResidualBlock(
+                        factors::RoadProfileGnssFactor::Create(u, meas_pos_ned.z(), profile_sigma),
+                        nullptr,
+                        &road_profile_h_nodes_[start],
+                        &road_profile_h_nodes_[start + 1]);
+                    ++road_profile_gnss_factor_count;
+                }
+                for (int i = 0; i + 1 < static_cast<int>(road_profile_h_nodes_.size()); ++i) {
+                    problem.AddResidualBlock(
+                        factors::RoadProfileSmoothnessFactor::Create(config_.road_profile_prior_sigma_m),
+                        nullptr,
+                        &road_profile_h_nodes_[i],
+                        &road_profile_h_nodes_[i + 1]);
+                    ++road_profile_base_smoothness_factor_count;
+                }
+                for (int i = 1; i + 1 < static_cast<int>(road_profile_h_nodes_.size()); ++i) {
+                    problem.AddResidualBlock(
+                        factors::RoadProfileCurvatureFactor::Create(config_.road_profile_curvature_sigma_m),
+                        nullptr,
+                        &road_profile_h_nodes_[i - 1],
+                        &road_profile_h_nodes_[i],
+                        &road_profile_h_nodes_[i + 1]);
+                    ++road_profile_base_curvature_factor_count;
+                }
+                const double anchor_spacing = std::max(config_.road_profile_ds_m, config_.road_profile_anchor_spacing_m);
+                double next_anchor_s = anchor_spacing;
+                for (size_t i = 1; i < road_profile_h_nodes_.size(); ++i) {
+                    if (road_profile_s_nodes_[i] + 1.0e-9 < next_anchor_s && i + 1 < road_profile_h_nodes_.size()) {
+                        continue;
+                    }
+                    const double ref_h = road_profile_h_nodes_[i];
+                    problem.AddResidualBlock(
+                        factors::RoadProfileAnchorFactor::Create(ref_h, config_.road_profile_anchor_sigma_m),
+                        nullptr,
+                        &road_profile_h_nodes_[i]);
+                    ++road_profile_base_anchor_factor_count;
+                    next_anchor_s += anchor_spacing;
+                }
             }
         }
 
@@ -1152,9 +1291,12 @@ bool System::BuildAndSolveProblem() {
         LOG(INFO) << "Vertical smoothness factors: " << vertical_smoothness_factor_count;
         LOG(INFO) << "Vertical prior factors: " << vertical_prior_factor_count;
         LOG(INFO) << "Road-profile GNSS factors: " << road_profile_gnss_factor_count;
-        LOG(INFO) << "Road-profile smoothness factors: " << road_profile_smoothness_factor_count;
-        LOG(INFO) << "Road-profile curvature factors: " << road_profile_curvature_factor_count;
-        LOG(INFO) << "Road-profile anchor factors: " << road_profile_anchor_factor_count;
+        LOG(INFO) << "Road-profile base smoothness factors: " << road_profile_base_smoothness_factor_count;
+        LOG(INFO) << "Road-profile base curvature factors: " << road_profile_base_curvature_factor_count;
+        LOG(INFO) << "Road-profile base anchor factors: " << road_profile_base_anchor_factor_count;
+        LOG(INFO) << "Road-profile residual smoothness factors: " << road_profile_residual_smoothness_factor_count;
+        LOG(INFO) << "Road-profile residual curvature factors: " << road_profile_residual_curvature_factor_count;
+        LOG(INFO) << "Road-profile residual zero factors: " << road_profile_residual_zero_factor_count;
         LOG(INFO) << "Direct spline inertial factors: " << inertial_factor_count;
         LOG(INFO) << "Bias random-walk factors: " << bias_rw_factor_count;
         LOG(INFO) << summary.BriefReport();
@@ -1618,8 +1760,15 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
             t_with_vertical.z() += composed.vertical_profile_correction_m;
             composed.full_pose = Sophus::SE3d(composed.full_pose.so3(), t_with_vertical);
         }
-        if (config_.enable_road_profile_state && road_profile_h_nodes_.size() >= 2 &&
-            road_profile_h_nodes_.size() == road_profile_s_nodes_.size() &&
+        const bool has_single_layer_profile =
+            road_profile_h_nodes_.size() >= 2 && road_profile_h_nodes_.size() == road_profile_s_nodes_.size();
+        const bool has_dual_layer_profile =
+            config_.road_profile_enable_dual_layer &&
+            road_profile_base_h_nodes_.size() >= 2 &&
+            road_profile_base_h_nodes_.size() == road_profile_base_s_nodes_.size() &&
+            road_profile_residual_h_nodes_.size() >= 2 &&
+            road_profile_residual_h_nodes_.size() == road_profile_residual_s_nodes_.size();
+        if (config_.enable_road_profile_state && (has_single_layer_profile || has_dual_layer_profile) &&
             nominal_distance_s_.size() == nominal_nav_.size() && !nominal_nav_.empty()) {
             std::vector<double> nav_times;
             nav_times.reserve(nominal_nav_.size());
@@ -1627,7 +1776,7 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
                 nav_times.push_back(nav.time);
             }
             const double s_query = InterpolateScalarSeries(time, nav_times, nominal_distance_s_);
-            const double road_h_ned = InterpolateScalarSeries(s_query, road_profile_s_nodes_, road_profile_h_nodes_);
+            const double road_h_ned = EvaluateRoadProfileHeightAtDistance(s_query);
             Vector3d t_with_road = composed.full_pose.translation();
             t_with_road.z() = road_h_ned;
             composed.full_pose = Sophus::SE3d(composed.full_pose.so3(), t_with_road);
@@ -1803,6 +1952,10 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory() {
 void System::ResetRoadProfileNodesFromNominalTrajectory() {
     road_profile_s_nodes_.clear();
     road_profile_h_nodes_.clear();
+    road_profile_base_s_nodes_.clear();
+    road_profile_base_h_nodes_.clear();
+    road_profile_residual_s_nodes_.clear();
+    road_profile_residual_h_nodes_.clear();
     if (!config_.enable_road_profile_state || nominal_nav_.empty()) {
         return;
     }
@@ -1819,14 +1972,51 @@ void System::ResetRoadProfileNodesFromNominalTrajectory() {
         nominal_h_ned.push_back(Earth::GlobalToLocal(origin_blh_, nav.blh).z());
     }
 
-    const double ds = std::max(0.05, config_.road_profile_ds_m);
     const double s_end = nominal_distance_s_.back();
+    if (config_.road_profile_enable_dual_layer) {
+        const double base_ds = std::max(0.10, config_.road_profile_base_ds_m);
+        const double residual_ds = std::max(0.05, config_.road_profile_residual_ds_m);
+        for (double s = 0.0; s < s_end - 1.0e-9; s += base_ds) {
+            road_profile_base_s_nodes_.push_back(s);
+            road_profile_base_h_nodes_.push_back(
+                InterpolateScalarSeries(s, nominal_distance_s_, nominal_h_ned));
+        }
+        road_profile_base_s_nodes_.push_back(s_end);
+        road_profile_base_h_nodes_.push_back(nominal_h_ned.back());
+
+        for (double s = 0.0; s < s_end - 1.0e-9; s += residual_ds) {
+            road_profile_residual_s_nodes_.push_back(s);
+            road_profile_residual_h_nodes_.push_back(0.0);
+        }
+        road_profile_residual_s_nodes_.push_back(s_end);
+        road_profile_residual_h_nodes_.push_back(0.0);
+        return;
+    }
+
+    const double ds = std::max(0.05, config_.road_profile_ds_m);
     for (double s = 0.0; s < s_end - 1.0e-9; s += ds) {
         road_profile_s_nodes_.push_back(s);
         road_profile_h_nodes_.push_back(InterpolateScalarSeries(s, nominal_distance_s_, nominal_h_ned));
     }
     road_profile_s_nodes_.push_back(s_end);
     road_profile_h_nodes_.push_back(nominal_h_ned.back());
+}
+
+double System::EvaluateRoadProfileHeightAtDistance(double s_query) const {
+    const bool use_dual_layer =
+        config_.road_profile_enable_dual_layer &&
+        road_profile_base_h_nodes_.size() >= 2 &&
+        road_profile_base_h_nodes_.size() == road_profile_base_s_nodes_.size() &&
+        road_profile_residual_h_nodes_.size() >= 2 &&
+        road_profile_residual_h_nodes_.size() == road_profile_residual_s_nodes_.size();
+    if (use_dual_layer) {
+        return InterpolateScalarSeries(s_query, road_profile_base_s_nodes_, road_profile_base_h_nodes_) +
+               InterpolateScalarSeries(s_query, road_profile_residual_s_nodes_, road_profile_residual_h_nodes_);
+    }
+    if (!road_profile_s_nodes_.empty() && road_profile_s_nodes_.size() == road_profile_h_nodes_.size()) {
+        return InterpolateScalarSeries(s_query, road_profile_s_nodes_, road_profile_h_nodes_);
+    }
+    return 0.0;
 }
 
 void System::UpdateNominalTrajectoryFromCurrentBiases() {
@@ -1957,13 +2147,42 @@ bool System::SaveOutputs() const {
         }
     }
 
-    if (config_.enable_road_profile_state && !road_profile_s_nodes_.empty() &&
-        road_profile_s_nodes_.size() == road_profile_h_nodes_.size()) {
-        const std::filesystem::path road_profile_path = config_.output_path / "road_profile_nodes.txt";
-        std::ofstream road_profile_ofs(road_profile_path);
-        road_profile_ofs << "# s_m h_ned_m\n";
-        for (size_t i = 0; i < road_profile_s_nodes_.size(); ++i) {
-            road_profile_ofs << road_profile_s_nodes_[i] << ' ' << road_profile_h_nodes_[i] << '\n';
+    if (config_.enable_road_profile_state) {
+        if (config_.road_profile_enable_dual_layer &&
+            !road_profile_base_s_nodes_.empty() &&
+            road_profile_base_s_nodes_.size() == road_profile_base_h_nodes_.size() &&
+            !road_profile_residual_s_nodes_.empty() &&
+            road_profile_residual_s_nodes_.size() == road_profile_residual_h_nodes_.size()) {
+            const std::filesystem::path road_profile_base_path = config_.output_path / "road_profile_base_nodes.txt";
+            std::ofstream road_profile_base_ofs(road_profile_base_path);
+            road_profile_base_ofs << "# s_m h_base_ned_m\n";
+            for (size_t i = 0; i < road_profile_base_s_nodes_.size(); ++i) {
+                road_profile_base_ofs << road_profile_base_s_nodes_[i] << ' ' << road_profile_base_h_nodes_[i] << '\n';
+            }
+
+            const std::filesystem::path road_profile_residual_path =
+                config_.output_path / "road_profile_residual_nodes.txt";
+            std::ofstream road_profile_residual_ofs(road_profile_residual_path);
+            road_profile_residual_ofs << "# s_m h_residual_m\n";
+            for (size_t i = 0; i < road_profile_residual_s_nodes_.size(); ++i) {
+                road_profile_residual_ofs << road_profile_residual_s_nodes_[i] << ' '
+                                          << road_profile_residual_h_nodes_[i] << '\n';
+            }
+
+            const std::filesystem::path road_profile_total_path = config_.output_path / "road_profile_nodes.txt";
+            std::ofstream road_profile_total_ofs(road_profile_total_path);
+            road_profile_total_ofs << "# s_m h_total_ned_m\n";
+            for (size_t i = 0; i < road_profile_residual_s_nodes_.size(); ++i) {
+                const double s = road_profile_residual_s_nodes_[i];
+                road_profile_total_ofs << s << ' ' << EvaluateRoadProfileHeightAtDistance(s) << '\n';
+            }
+        } else if (!road_profile_s_nodes_.empty() && road_profile_s_nodes_.size() == road_profile_h_nodes_.size()) {
+            const std::filesystem::path road_profile_path = config_.output_path / "road_profile_nodes.txt";
+            std::ofstream road_profile_ofs(road_profile_path);
+            road_profile_ofs << "# s_m h_ned_m\n";
+            for (size_t i = 0; i < road_profile_s_nodes_.size(); ++i) {
+                road_profile_ofs << road_profile_s_nodes_[i] << ' ' << road_profile_h_nodes_[i] << '\n';
+            }
         }
     }
 
@@ -1985,11 +2204,23 @@ bool System::SaveOutputs() const {
     summary_ofs << "road_profile_curvature_sigma_m: " << config_.road_profile_curvature_sigma_m << '\n';
     summary_ofs << "road_profile_anchor_sigma_m: " << config_.road_profile_anchor_sigma_m << '\n';
     summary_ofs << "road_profile_anchor_spacing_m: " << config_.road_profile_anchor_spacing_m << '\n';
+    summary_ofs << "road_profile_enable_dual_layer: " << config_.road_profile_enable_dual_layer << '\n';
+    summary_ofs << "road_profile_base_ds_m: " << config_.road_profile_base_ds_m << '\n';
+    summary_ofs << "road_profile_base_prior_sigma_m: " << config_.road_profile_base_prior_sigma_m << '\n';
+    summary_ofs << "road_profile_base_curvature_sigma_m: " << config_.road_profile_base_curvature_sigma_m << '\n';
+    summary_ofs << "road_profile_base_anchor_sigma_m: " << config_.road_profile_base_anchor_sigma_m << '\n';
+    summary_ofs << "road_profile_base_anchor_spacing_m: " << config_.road_profile_base_anchor_spacing_m << '\n';
+    summary_ofs << "road_profile_residual_ds_m: " << config_.road_profile_residual_ds_m << '\n';
+    summary_ofs << "road_profile_residual_prior_sigma_m: " << config_.road_profile_residual_prior_sigma_m << '\n';
+    summary_ofs << "road_profile_residual_curvature_sigma_m: " << config_.road_profile_residual_curvature_sigma_m << '\n';
+    summary_ofs << "road_profile_residual_zero_sigma_m: " << config_.road_profile_residual_zero_sigma_m << '\n';
     summary_ofs << "output_query_dt_s: " << config_.output_query_dt_s << '\n';
     summary_ofs << "gnss_count: " << gnss_.size() << '\n';
     summary_ofs << "imu_count: " << imu_.size() << '\n';
     summary_ofs << "control_point_count: " << control_points_.size() << '\n';
     summary_ofs << "road_profile_node_count: " << road_profile_s_nodes_.size() << '\n';
+    summary_ofs << "road_profile_base_node_count: " << road_profile_base_s_nodes_.size() << '\n';
+    summary_ofs << "road_profile_residual_node_count: " << road_profile_residual_s_nodes_.size() << '\n';
     summary_ofs << "outer_iterations: " << config_.outer_iterations << '\n';
     summary_ofs << "enable_initial_yaw_feedback: " << config_.enable_initial_yaw_feedback << '\n';
     summary_ofs << "initial_yaw_feedback_applied: " << initial_yaw_feedback_applied_ << '\n';
