@@ -1,7 +1,10 @@
 build/
+build_zaxis/
+build_zAxisPro/
 out/
 bin/
 output/
+output_delta_debug/
 output_2600/
 output_2600_align_end/
 output_sync_backup_*/
@@ -9,5 +12,7 @@ output_sync_backup_*/
 *.suo
 *.vcxproj.user
 *.log
+*_stdout.txt
+*_stderr.txt
 __pycache__/
 *.pyc
