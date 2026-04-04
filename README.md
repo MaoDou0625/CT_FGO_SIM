@@ -180,3 +180,57 @@ It should be treated as:
 - the branch where the coordinate-frame error was fixed
 - the branch where NHC support and dense output were introduced
 
+## 2026-04 Road-Profile Findings
+
+Recent road-profile experiments compared three directions:
+
+- direct spline-state baseline without road-profile state
+- single-layer distance-domain road-profile state
+- dual-layer road-profile state with base/residual splitting
+
+### Branches
+
+- `paper/single-layer-param-laws`: current working branch for parameter-law mapping
+- `paper/dual-road-profile-unusable`: archived dual-layer branch kept only for reference; it is marked as unusable because it did not outperform the single-layer results in the controlled IRI experiments
+
+### Current conclusion
+
+The single-layer road-profile state is currently the most useful structure.
+
+The dual-layer branch was reasonable in principle, but in practice it failed to produce a robust parameter region that improved both:
+
+- low-IRI cases around `IRI ~= 2`
+- high-IRI cases around `IRI ~= 10`
+
+The dual-layer versions repeatedly showed one of the following failure modes:
+
+- suppressing `IRI ~= 10` too strongly
+- over-amplifying `IRI ~= 2`
+- improving one side only by damaging the other
+
+For this reason, the current work has been rolled back to the single-layer structure.
+
+### Single-layer parameter-law summary
+
+The most important single-layer parameters are:
+
+- `road_profile_ds_m`: distance-domain node spacing of the road-profile state
+- `road_profile_anchor_sigma_m`: low-frequency anchoring strength
+- `gnss_sigma_vertical_m`: vertical GNSS weighting
+
+Current observations from the parameter map are:
+
+1. `road_profile_ds_m` is the dominant parameter controlling IRI scaling.
+2. Smaller `road_profile_ds_m` gives higher profile bandwidth and tends to enlarge IRI.
+3. Larger `road_profile_ds_m` smooths the profile more strongly and tends to shrink IRI.
+4. `gnss_sigma_vertical_m` has a scenario-dependent optimum; it is not true that smaller is always better.
+5. `road_profile_anchor_sigma_m` mainly acts as a secondary tuning parameter and has much weaker influence than `road_profile_ds_m`.
+
+### Best currently observed single-layer settings in the controlled map
+
+For the tested controlled cases:
+
+- `IRI ~= 2`: best match was near `gnss_sigma_vertical_m = 0.003`, `road_profile_ds_m = 0.25`, `road_profile_anchor_sigma_m = 0.02`
+- `IRI ~= 10`: best match was near `gnss_sigma_vertical_m = 0.0008`, `road_profile_ds_m = 0.25`, `road_profile_anchor_sigma_m = 0.02`
+
+These values should be treated as empirical findings for the current simulation chain, not as universal defaults.
