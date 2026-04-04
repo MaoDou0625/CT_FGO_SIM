@@ -74,6 +74,9 @@ struct AppConfig {
     double road_profile_residual_mean_sigma_m = 0.003;
     double road_profile_residual_band_window_m = 2.0;
     double road_profile_residual_band_sigma_m = 0.001;
+    double road_profile_gnss_split_window_m = 4.0;
+    double road_profile_base_gnss_sigma_m = 0.0;
+    double road_profile_residual_gnss_sigma_m = 0.0;
     double imu_sigma_accel_mps2 = 0.2;
     double imu_sigma_gyro_rps = 0.01;
     double gyro_bias_rw_sigma = 1.0e-4;
