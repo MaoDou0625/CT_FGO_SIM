@@ -339,6 +339,47 @@ double InterpolateScalarSeries(
     return y_axis[i] * (1.0 - u) + y_axis[j] * u;
 }
 
+double NormalizedSinc(double x) {
+    if (std::abs(x) <= 1.0e-9) {
+        return 1.0;
+    }
+    return std::sin(M_PI * x) / (M_PI * x);
+}
+
+double EvaluateFirLowpassAtDistance(
+    double s_query,
+    const std::vector<double>& s_samples,
+    const std::vector<double>& h_samples,
+    double cutoff_wavelength_m,
+    double half_window_m) {
+    if (s_samples.empty() || s_samples.size() != h_samples.size()) {
+        return 0.0;
+    }
+
+    const double lambda_c = std::max(1.0e-3, cutoff_wavelength_m);
+    const double fc = 1.0 / lambda_c;  // cycles per meter
+    const double half_window = std::max(0.5 * lambda_c, half_window_m);
+
+    double weighted_sum = 0.0;
+    double weight_sum = 0.0;
+    for (size_t i = 0; i < s_samples.size(); ++i) {
+        const double ds = s_samples[i] - s_query;
+        if (std::abs(ds) > half_window) {
+            continue;
+        }
+        const double sinc_weight = 2.0 * fc * NormalizedSinc(2.0 * fc * ds);
+        const double window_weight = 0.54 + 0.46 * std::cos(M_PI * ds / half_window);
+        const double weight = sinc_weight * window_weight;
+        weighted_sum += weight * h_samples[i];
+        weight_sum += weight;
+    }
+
+    if (std::abs(weight_sum) <= 1.0e-9) {
+        return InterpolateScalarSeries(s_query, s_samples, h_samples);
+    }
+    return weighted_sum / weight_sum;
+}
+
 bool FindScalarSeriesInterval(
     double x,
     const std::vector<double>& x_axis,
@@ -503,6 +544,9 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     }
     if (cfg["road_profile_gnss_split_window_m"]) {
         config_.road_profile_gnss_split_window_m = cfg["road_profile_gnss_split_window_m"].as<double>();
+    }
+    if (cfg["road_profile_gnss_fir_half_window_m"]) {
+        config_.road_profile_gnss_fir_half_window_m = cfg["road_profile_gnss_fir_half_window_m"].as<double>();
     }
     if (cfg["road_profile_base_gnss_sigma_m"]) {
         config_.road_profile_base_gnss_sigma_m = cfg["road_profile_base_gnss_sigma_m"].as<double>();
@@ -783,6 +827,7 @@ void System::Describe() const {
     LOG(INFO) << "Road profile residual band window (m): " << config_.road_profile_residual_band_window_m;
     LOG(INFO) << "Road profile residual band sigma (m): " << config_.road_profile_residual_band_sigma_m;
     LOG(INFO) << "Road profile GNSS split window (m): " << config_.road_profile_gnss_split_window_m;
+    LOG(INFO) << "Road profile GNSS FIR half window (m): " << config_.road_profile_gnss_fir_half_window_m;
     LOG(INFO) << "Road profile base GNSS sigma (m): " << config_.road_profile_base_gnss_sigma_m;
     LOG(INFO) << "Road profile residual GNSS sigma (m): " << config_.road_profile_residual_gnss_sigma_m;
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
@@ -1179,9 +1224,12 @@ bool System::BuildAndSolveProblem() {
                 }
                 problem.SetParameterBlockConstant(&road_profile_base_h_nodes_.front());
 
-                const double split_half_window = 0.5 * std::max(
+                const double split_cutoff_wavelength = std::max(
                     config_.road_profile_residual_ds_m,
                     config_.road_profile_gnss_split_window_m);
+                const double split_fir_half_window = std::max(
+                    split_cutoff_wavelength,
+                    config_.road_profile_gnss_fir_half_window_m);
                 const double base_gnss_sigma = config_.road_profile_base_gnss_sigma_m > 0.0
                     ? config_.road_profile_base_gnss_sigma_m
                     : profile_sigma;
@@ -1199,22 +1247,12 @@ bool System::BuildAndSolveProblem() {
                         continue;
                     }
 
-                    double lowpass_h = 0.0;
-                    double lowpass_weight = 0.0;
-                    for (size_t window_i = 0; window_i < gnss_profile_s.size(); ++window_i) {
-                        const double ds = std::abs(gnss_profile_s[window_i] - s_query);
-                        if (ds > split_half_window) {
-                            continue;
-                        }
-                        const double weight = 1.0 - ds / std::max(1.0e-6, split_half_window);
-                        lowpass_h += weight * gnss_profile_h[window_i];
-                        lowpass_weight += weight;
-                    }
-                    if (lowpass_weight <= 1.0e-9) {
-                        lowpass_h = gnss_profile_h[gnss_i];
-                    } else {
-                        lowpass_h /= lowpass_weight;
-                    }
+                    const double lowpass_h = EvaluateFirLowpassAtDistance(
+                        s_query,
+                        gnss_profile_s,
+                        gnss_profile_h,
+                        split_cutoff_wavelength,
+                        split_fir_half_window);
                     const double residual_h = gnss_profile_h[gnss_i] - lowpass_h;
 
                     problem.AddResidualBlock(
@@ -2337,6 +2375,7 @@ bool System::SaveOutputs() const {
     summary_ofs << "road_profile_residual_band_window_m: " << config_.road_profile_residual_band_window_m << '\n';
     summary_ofs << "road_profile_residual_band_sigma_m: " << config_.road_profile_residual_band_sigma_m << '\n';
     summary_ofs << "road_profile_gnss_split_window_m: " << config_.road_profile_gnss_split_window_m << '\n';
+    summary_ofs << "road_profile_gnss_fir_half_window_m: " << config_.road_profile_gnss_fir_half_window_m << '\n';
     summary_ofs << "road_profile_base_gnss_sigma_m: " << config_.road_profile_base_gnss_sigma_m << '\n';
     summary_ofs << "road_profile_residual_gnss_sigma_m: " << config_.road_profile_residual_gnss_sigma_m << '\n';
     summary_ofs << "output_query_dt_s: " << config_.output_query_dt_s << '\n';
