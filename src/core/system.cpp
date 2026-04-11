@@ -88,6 +88,44 @@ struct YawFeedbackSample {
     double yaw_error_rad = 0.0;
 };
 
+struct RtkVelocityHeadingSample {
+    double time = 0.0;
+    double speed_mps = 0.0;
+    double heading_rad = 0.0;
+};
+
+std::vector<RtkVelocityHeadingSample> BuildRtkVelocityHeadingSamples(
+    const GnssMeasurementArray& gnss,
+    const Vector3d& origin_blh,
+    double min_speed_mps,
+    double window_start_s,
+    double window_end_s) {
+    std::vector<RtkVelocityHeadingSample> samples;
+    samples.reserve(gnss.size());
+    for (size_t i = 1; i < gnss.size(); ++i) {
+        const double dt = gnss[i].time - gnss[i - 1].time;
+        if (dt <= 1.0e-3) {
+            continue;
+        }
+
+        const double mid_time = 0.5 * (gnss[i].time + gnss[i - 1].time);
+        if (mid_time < window_start_s || mid_time > window_end_s) {
+            continue;
+        }
+
+        const Vector3d p_prev_ned = Earth::GlobalToLocal(origin_blh, gnss[i - 1].blh);
+        const Vector3d p_cur_ned = Earth::GlobalToLocal(origin_blh, gnss[i].blh);
+        const Vector3d v_ned = (p_cur_ned - p_prev_ned) / dt;
+        const double horizontal_speed = v_ned.head<2>().norm();
+        if (horizontal_speed < min_speed_mps) {
+            continue;
+        }
+
+        samples.push_back({mid_time, horizontal_speed, std::atan2(v_ned.y(), v_ned.x())});
+    }
+    return samples;
+}
+
 double CircularMeanRad(const std::vector<YawFeedbackSample>& samples, size_t begin, size_t end) {
     double weighted_sin = 0.0;
     double weighted_cos = 0.0;
@@ -871,36 +909,22 @@ bool System::ApplyInitialYawFeedbackFromGnss() {
     std::vector<YawFeedbackSample> samples;
     samples.reserve(gnss_.size());
 
-    for (size_t i = 1; i < gnss_.size(); ++i) {
-        const double dt = gnss_[i].time - gnss_[i - 1].time;
-        if (dt <= 1.0e-3) {
-            continue;
-        }
-
-        const double mid_time = 0.5 * (gnss_[i].time + gnss_[i - 1].time);
-        if (!use_global_heading_pairs &&
-            (mid_time < initial_alignment_.reference_time || mid_time > window_end_time)) {
-            continue;
-        }
-
-        const Vector3d p_prev_ned = Earth::GlobalToLocal(origin_blh_, gnss_[i - 1].blh);
-        const Vector3d p_cur_ned = Earth::GlobalToLocal(origin_blh_, gnss_[i].blh);
-        const Vector3d v_ned = (p_cur_ned - p_prev_ned) / dt;
-        const double horizontal_speed = v_ned.head<2>().norm();
-        if (horizontal_speed < config_.initial_yaw_feedback_min_speed_mps) {
-            continue;
-        }
-
-        const auto composed = EvaluateComposedState(mid_time);
+    const std::vector<RtkVelocityHeadingSample> rtk_heading_samples = BuildRtkVelocityHeadingSamples(
+        gnss_,
+        origin_blh_,
+        config_.initial_yaw_feedback_min_speed_mps,
+        use_global_heading_pairs ? -std::numeric_limits<double>::infinity() : initial_alignment_.reference_time,
+        window_end_time);
+    for (const auto& rtk_heading : rtk_heading_samples) {
+        const auto composed = EvaluateComposedState(rtk_heading.time);
         if (!composed) {
             continue;
         }
 
-        const double rtk_yaw = std::atan2(v_ned.y(), v_ned.x());
         const Eigen::Quaterniond q_nb(Eigen::Matrix3d(composed->full_pose.so3().matrix()));
         const double ct_yaw = YawFromQuaternionNed(q_nb);
-        const double yaw_error = WrapAngleRad(rtk_yaw - ct_yaw);
-        samples.push_back(YawFeedbackSample{mid_time, horizontal_speed, yaw_error});
+        const double yaw_error = WrapAngleRad(rtk_heading.heading_rad - ct_yaw);
+        samples.push_back(YawFeedbackSample{rtk_heading.time, rtk_heading.speed_mps, yaw_error});
     }
 
     if (static_cast<int>(samples.size()) < config_.initial_yaw_feedback_min_pairs) {
@@ -1482,6 +1506,35 @@ bool System::SaveOutputs() const {
                        << q.x() << ' ' << q.y() << ' ' << q.z() << ' ' << q.w() << '\n';
     }
 
+    const std::filesystem::path rtk_heading_path = config_.output_path / "rtk_velocity_heading.txt";
+    std::ofstream rtk_heading_ofs(rtk_heading_path);
+    rtk_heading_ofs << "# time_s speed_mps rtk_heading_rad rtk_heading_deg ct_heading_rad ct_heading_deg ct_minus_rtk_deg\n";
+    const std::vector<RtkVelocityHeadingSample> rtk_heading_samples = BuildRtkVelocityHeadingSamples(
+        gnss_,
+        origin_blh_,
+        config_.initial_yaw_feedback_min_speed_mps,
+        -std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity());
+    size_t rtk_heading_output_count = 0;
+    for (const auto& rtk_heading : rtk_heading_samples) {
+        const auto composed = EvaluateComposedState(rtk_heading.time);
+        if (!composed) {
+            continue;
+        }
+        const Eigen::Quaterniond q_nb(Eigen::Matrix3d(composed->full_pose.so3().matrix()));
+        const double ct_heading_rad = YawFromQuaternionNed(q_nb);
+        const double ct_minus_rtk_rad = WrapAngleRad(ct_heading_rad - rtk_heading.heading_rad);
+        rtk_heading_ofs << std::setprecision(17)
+                        << rtk_heading.time << ' '
+                        << rtk_heading.speed_mps << ' '
+                        << rtk_heading.heading_rad << ' '
+                        << rtk_heading.heading_rad / kDegToRad << ' '
+                        << ct_heading_rad << ' '
+                        << ct_heading_rad / kDegToRad << ' '
+                        << ct_minus_rtk_rad / kDegToRad << '\n';
+        ++rtk_heading_output_count;
+    }
+
     const std::filesystem::path bias_path = config_.output_path / "bias_nodes.txt";
     std::ofstream bias_ofs(bias_path);
     bias_ofs << "# time_s d_bgx d_bgy d_bgz d_bax d_bay d_baz d_sgx d_sgy d_sgz d_sax d_say d_saz\n";
@@ -1501,6 +1554,7 @@ bool System::SaveOutputs() const {
     summary_ofs << "use_gnss_factors: " << config_.use_gnss_factors << '\n';
     summary_ofs << "use_imu_factors: " << config_.use_imu_factors << '\n';
     summary_ofs << "gnss_count: " << gnss_.size() << '\n';
+    summary_ofs << "rtk_velocity_heading_count: " << rtk_heading_output_count << '\n';
     summary_ofs << "imu_count: " << imu_.size() << '\n';
     summary_ofs << "control_point_count: " << control_points_.size() << '\n';
     summary_ofs << "error_state_dimension: 21\n";
@@ -1645,7 +1699,7 @@ bool System::SaveOutputs() const {
 
     LOG(INFO) << "Wrote outputs to " << config_.output_path.string();
     return trajectory_ofs.good() && bias_ofs.good() && summary_ofs.good() &&
-           nominal_ofs.good() && delta_ofs.good() && iteration_debug_ofs.good();
+           rtk_heading_ofs.good() && nominal_ofs.good() && delta_ofs.good() && iteration_debug_ofs.good();
 }
 
 }  // namespace ct_fgo_sim
