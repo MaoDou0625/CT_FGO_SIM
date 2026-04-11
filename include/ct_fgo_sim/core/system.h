@@ -145,7 +145,8 @@ private:
     bool InjectCurrentErrorStateIntoNominalTrajectory(
         int outer_iteration,
         std::optional<double> inject_start_time = std::nullopt,
-        std::optional<double> inject_end_time = std::nullopt);
+        std::optional<double> inject_end_time = std::nullopt,
+        std::optional<double> propagate_end_time = std::nullopt);
     std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
     std::optional<Vector3d> EvaluateNominalAccelAtTime(double time) const;
     std::optional<Vector3d> EvaluateNodeValueAtTime(

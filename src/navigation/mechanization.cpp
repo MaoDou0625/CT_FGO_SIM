@@ -401,6 +401,86 @@ NominalNavStates PropagateNominalTrajectory(
     return nav;
 }
 
+bool PropagateNominalTrajectoryForward(
+    const ImuMeasurementArray& imu,
+    double start_time,
+    double end_time,
+    const std::vector<double>& bias_times,
+    const AlignedVec3Array& gyro_biases,
+    const AlignedVec3Array& accel_biases,
+    const AlignedVec3Array& gyro_scales,
+    const AlignedVec3Array& accel_scales,
+    NominalNavStates& states) {
+    if (imu.size() < 2 || states.size() < 2 || imu.size() != states.size()) {
+        return false;
+    }
+    if (end_time <= start_time) {
+        return true;
+    }
+
+    auto anchor_it = std::lower_bound(
+        states.begin(),
+        states.end(),
+        start_time,
+        [](const NominalNavState& state, double time) { return state.time < time; });
+    if (anchor_it == states.end()) {
+        return false;
+    }
+    size_t anchor_index = static_cast<size_t>(std::distance(states.begin(), anchor_it));
+    if (anchor_index == 0) {
+        anchor_index = 1;
+    }
+    while (anchor_index + 1 < states.size() && states[anchor_index].time < start_time) {
+        ++anchor_index;
+    }
+    if (anchor_index >= states.size()) {
+        return false;
+    }
+
+    PvaState pvacur;
+    pvacur.blh = states[anchor_index].blh;
+    pvacur.vel_ned = states[anchor_index].vel_ned;
+    pvacur.q_nb = states[anchor_index].q_nb;
+
+    bool updated = false;
+    for (size_t i = anchor_index + 1; i < imu.size() && i < states.size(); ++i) {
+        const auto& meas = imu[i];
+        if (meas.time > end_time) {
+            break;
+        }
+        if (meas.dt <= 0.0) {
+            continue;
+        }
+
+        const Vector3d bg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_biases, states[i - 1].bg);
+        const Vector3d ba_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_biases, states[i - 1].ba);
+        const Vector3d sg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_scales, states[i - 1].sg);
+        const Vector3d sa_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_scales, states[i - 1].sa);
+        const Vector3d bg_cur = InterpolateBias(meas.time, bias_times, gyro_biases, states[i - 1].bg);
+        const Vector3d ba_cur = InterpolateBias(meas.time, bias_times, accel_biases, states[i - 1].ba);
+        const Vector3d sg_cur = InterpolateBias(meas.time, bias_times, gyro_scales, states[i - 1].sg);
+        const Vector3d sa_cur = InterpolateBias(meas.time, bias_times, accel_scales, states[i - 1].sa);
+
+        const MechImuSample imupre = BiasCompensate(imu[i - 1], bg_pre, ba_pre, sg_pre, sa_pre);
+        const MechImuSample imucur = BiasCompensate(meas, bg_cur, ba_cur, sg_cur, sa_cur);
+
+        PvaState pvapre = pvacur;
+        KfVelUpdate(pvapre, pvacur, imupre, imucur);
+        KfPosUpdate(pvapre, pvacur, imucur);
+        KfAttUpdate(pvapre, pvacur, imupre, imucur);
+
+        states[i].blh = pvacur.blh;
+        states[i].vel_ned = pvacur.vel_ned;
+        states[i].q_nb = pvacur.q_nb;
+        states[i].bg = bg_cur;
+        states[i].ba = ba_cur;
+        states[i].sg = sg_cur;
+        states[i].sa = sa_cur;
+        updated = true;
+    }
+    return updated;
+}
+
 std::optional<NominalNavState> EvaluateNominalState(
     const NominalNavStates& states,
     double time) {

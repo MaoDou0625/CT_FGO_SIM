@@ -50,6 +50,17 @@ NominalNavStates PropagateNominalTrajectory(
     const AlignedVec3Array& gyro_scales = {},
     const AlignedVec3Array& accel_scales = {});
 
+bool PropagateNominalTrajectoryForward(
+    const ImuMeasurementArray& imu,
+    double start_time,
+    double end_time,
+    const std::vector<double>& bias_times,
+    const AlignedVec3Array& gyro_biases,
+    const AlignedVec3Array& accel_biases,
+    const AlignedVec3Array& gyro_scales,
+    const AlignedVec3Array& accel_scales,
+    NominalNavStates& states);
+
 std::optional<NominalNavState> EvaluateNominalState(
     const NominalNavStates& states,
     double time);

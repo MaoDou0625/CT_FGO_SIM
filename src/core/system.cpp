@@ -893,9 +893,11 @@ bool System::RunSlidingWindowFeedback() {
 
         const double inject_start = window_start;
         const double inject_end = std::min(window_start + mature_s, window_end);
+        const double propagate_end = std::min(inject_end + window_s, full_end);
         LOG(INFO) << "Sliding-window feedback " << (window_count + 1)
                   << ": solve [" << window_start << ", " << window_end
-                  << "], inject mature [" << inject_start << ", " << inject_end << "]";
+                  << "], inject mature [" << inject_start << ", " << inject_end
+                  << "], carry nominal to " << propagate_end;
         if (!BuildAndSolveProblem(
                 window_start,
                 window_end,
@@ -905,11 +907,12 @@ bool System::RunSlidingWindowFeedback() {
         if (!InjectCurrentErrorStateIntoNominalTrajectory(
                 -(window_count + 1),
                 inject_start,
-                inject_end)) {
+                inject_end,
+                propagate_end)) {
             LOG(ERROR) << "Failed to inject sliding-window feedback";
             return false;
         }
-        if (!RefreshControlPointsFromNominalTrajectory(inject_start, inject_end)) {
+        if (!RefreshControlPointsFromNominalTrajectory(inject_start, propagate_end)) {
             LOG(ERROR) << "Failed to locally refresh control points after sliding-window feedback";
             return false;
         }
@@ -1399,7 +1402,8 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
 bool System::InjectCurrentErrorStateIntoNominalTrajectory(
     int outer_iteration,
     std::optional<double> inject_start_time,
-    std::optional<double> inject_end_time) {
+    std::optional<double> inject_end_time,
+    std::optional<double> propagate_end_time) {
     if (nominal_nav_.empty()) {
         LOG(ERROR) << "Cannot inject error state into an empty nominal trajectory";
         return false;
@@ -1421,6 +1425,7 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(
     const bool use_inject_window = inject_start_time && inject_end_time;
     const double inject_start = inject_start_time.value_or(nominal_nav_.front().time);
     const double inject_end = inject_end_time.value_or(nominal_nav_.back().time);
+    const double propagate_end = propagate_end_time.value_or(inject_end);
     const double inject_duration = std::max(0.0, inject_end - inject_start);
     const double taper_s = use_inject_window
         ? std::min(config_.sliding_window_taper_s, 0.5 * inject_duration)
@@ -1433,9 +1438,7 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(
             return 1.0;
         }
         const double start_u = std::clamp((time - inject_start) / taper_s, 0.0, 1.0);
-        const double end_u = std::clamp((inject_end - time) / taper_s, 0.0, 1.0);
-        const double u = std::min(start_u, end_u);
-        return u * u * (3.0 - 2.0 * u);
+        return start_u * start_u * (3.0 - 2.0 * start_u);
     };
 
     auto compute_gnss_residual_rms = [this, &in_inject_window]() {
@@ -1518,6 +1521,22 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(
         initial_q_nb_ = initial_alignment_.q_nb;
     }
 
+    if (use_inject_window && propagate_end > inject_end + 1.0e-9) {
+        if (!PropagateNominalTrajectoryForward(
+                imu_,
+                inject_end,
+                propagate_end,
+                {},
+                {},
+                {},
+                {},
+                {},
+                nominal_nav_)) {
+            LOG(WARNING) << "Forward nominal carry propagation updated no states over ["
+                         << inject_end << ", " << propagate_end << "]";
+        }
+    }
+
     for (auto& delta_theta : delta_theta_nodes_) {
         delta_theta.setZero();
     }
@@ -1554,7 +1573,7 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(
                     config_.accel_scale_rw_sigma,
                     config_.bias_tau_s,
                     inject_start,
-                    inject_end,
+                    propagate_end,
                     interval_cache_)) {
                 LOG(WARNING) << "Local interval propagation cache update touched no intervals";
             }
@@ -1584,7 +1603,8 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(
 
     LOG(INFO) << "Injected error-state nodes into nominal trajectory"
               << (use_inject_window ? " over mature window" : "")
-              << " [" << inject_start << ", " << inject_end << "], GNSS RMS "
+              << " [" << inject_start << ", " << inject_end << "], carry to "
+              << propagate_end << ", GNSS RMS "
               << gnss_residual_rms_before << " -> " << gnss_residual_rms_after
               << " m, taper=" << taper_s << " s, max |dtheta|="
               << max_delta_theta_norm << " rad, max |dv|=" << max_delta_vel_norm
@@ -1595,6 +1615,8 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(
 
     IterationDebugRecord debug_record;
     debug_record.outer_iteration = outer_iteration;
+    debug_record.start_time_s = inject_start;
+    debug_record.end_time_s = inject_end;
     debug_record.gnss_residual_rms_before_m = gnss_residual_rms_before;
     debug_record.gnss_residual_rms_after_m = gnss_residual_rms_after;
     debug_record.max_delta_theta_norm_rad = max_delta_theta_norm;
@@ -1625,8 +1647,6 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(
             pitch_deg.push_back(PitchFromQuaternionNed(nav.q_nb) / kDegToRad);
             yaw_deg.push_back(YawFromQuaternionNed(nav.q_nb) / kDegToRad);
         }
-        debug_record.start_time_s = start_time;
-        debug_record.end_time_s = time_s.empty() ? start_time : time_s.back();
         debug_record.roll_slope_deg_per_s = LinearSlopeLeastSquares(time_s, roll_deg);
         debug_record.pitch_slope_deg_per_s = LinearSlopeLeastSquares(time_s, pitch_deg);
         debug_record.yaw_slope_deg_per_s = LinearSlopeLeastSquares(time_s, yaw_deg);
