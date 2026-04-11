@@ -24,7 +24,7 @@ struct ErrorStateGnssFactor {
         const Eigen::Map<const Vec3T> delta_p_i(dp_i);
         const Eigen::Map<const Vec3T> delta_p_j(dp_j);
         const Vec3T delta_p = (T(1.0) - T(u_)) * delta_p_i + T(u_) * delta_p_j;
-        const Vec3T pos_pred = nominal_pos_enu_.cast<T>() + delta_p;
+        const Vec3T pos_pred = nominal_pos_enu_.cast<T>() - delta_p;
         Eigen::Map<Vec3T> res(residuals);
         res = sqrt_info_.cast<T>() * (pos_pred - pos_meas_enu_.cast<T>());
         return true;

@@ -1130,14 +1130,14 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
     composed.nominal = *nominal_state;
     const Vector3d nominal_local_ned = Earth::GlobalToLocal(origin_blh_, nominal_state->blh);
     const Sophus::SO3d nominal_rot(nominal_state->q_nb);
-    const Sophus::SO3d full_rot = nominal_rot * Sophus::SO3d::exp(*delta_theta);
+    const Sophus::SO3d full_rot = Sophus::SO3d::exp(*delta_theta) * nominal_rot;
     composed.delta_theta = *delta_theta;
     composed.delta_vel_ned = *delta_vel;
     composed.delta_pos_ned = *delta_pos;
     composed.delta_bg = *delta_bg;
     composed.delta_ba = *delta_ba;
-    composed.full_pose = Sophus::SE3d(full_rot, nominal_local_ned + *delta_pos);
-    composed.full_vel_ned = nominal_state->vel_ned + *delta_vel;
+    composed.full_pose = Sophus::SE3d(full_rot, nominal_local_ned - *delta_pos);
+    composed.full_vel_ned = nominal_state->vel_ned - *delta_vel;
     composed.full_vel_body = full_rot.inverse() * composed.full_vel_ned;
     composed.full_omega_body = *nominal_gyro + *delta_theta_dot + nominal_state->bg + *delta_bg;
     composed.full_accel_ned = *nominal_accel;
@@ -1164,6 +1164,24 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
         return false;
     }
 
+    auto compute_gnss_residual_rms = [this]() {
+        double sum_sq = 0.0;
+        int count = 0;
+        for (const auto& gnss : gnss_) {
+            const auto nominal_state = EvaluateNominalState(nominal_nav_, gnss.time);
+            if (!nominal_state) {
+                continue;
+            }
+            const Vector3d nominal_pos_ned = Earth::GlobalToLocal(origin_blh_, nominal_state->blh);
+            const Vector3d measured_pos_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
+            sum_sq += (nominal_pos_ned - measured_pos_ned).squaredNorm();
+            ++count;
+        }
+        return count > 0 ? std::sqrt(sum_sq / static_cast<double>(count)) : 0.0;
+    };
+
+    const double gnss_residual_rms_before = compute_gnss_residual_rms();
+
     double max_delta_theta_norm = 0.0;
     double max_delta_vel_norm = 0.0;
     double max_delta_pos_norm = 0.0;
@@ -1181,10 +1199,10 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
         }
 
         const Sophus::SO3d nominal_rot(nominal_state.q_nb);
-        nominal_state.q_nb = (nominal_rot * Sophus::SO3d::exp(*delta_theta)).unit_quaternion();
-        nominal_state.vel_ned += *delta_vel;
+        nominal_state.q_nb = (Sophus::SO3d::exp(*delta_theta) * nominal_rot).unit_quaternion();
+        nominal_state.vel_ned -= *delta_vel;
         const Vector3d nominal_local_ned = Earth::GlobalToLocal(origin_blh_, nominal_state.blh);
-        nominal_state.blh = Earth::LocalToGlobal(origin_blh_, nominal_local_ned + *delta_pos);
+        nominal_state.blh = Earth::LocalToGlobal(origin_blh_, nominal_local_ned - *delta_pos);
         nominal_state.bg += *delta_bg;
         nominal_state.ba += *delta_ba;
 
@@ -1238,14 +1256,22 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
         return false;
     }
 
-    LOG(INFO) << "Injected error-state nodes into nominal trajectory, max |dtheta|="
+    const double gnss_residual_rms_after = compute_gnss_residual_rms();
+
+    LOG(INFO) << "Injected error-state nodes into nominal trajectory, GNSS RMS "
+              << gnss_residual_rms_before << " -> " << gnss_residual_rms_after
+              << " m, max |dtheta|="
               << max_delta_theta_norm << " rad, max |dv|=" << max_delta_vel_norm
               << " m/s, max |dp|=" << max_delta_pos_norm << " m, max |dbg|="
               << max_delta_bg_norm << " rad/s, max |dba|=" << max_delta_ba_norm << " m/s^2";
 
     IterationDebugRecord debug_record;
     debug_record.outer_iteration = outer_iteration;
+    debug_record.gnss_residual_rms_before_m = gnss_residual_rms_before;
+    debug_record.gnss_residual_rms_after_m = gnss_residual_rms_after;
     debug_record.max_delta_theta_norm_rad = max_delta_theta_norm;
+    debug_record.max_delta_vel_norm_mps = max_delta_vel_norm;
+    debug_record.max_delta_pos_norm_m = max_delta_pos_norm;
     debug_record.max_delta_bg_norm_rps = max_delta_bg_norm;
     debug_record.max_delta_ba_norm_mps2 = max_delta_ba_norm;
     if (!nominal_nav_.empty()) {
@@ -1255,9 +1281,11 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
         std::vector<double> time_s;
         std::vector<double> roll_deg;
         std::vector<double> pitch_deg;
+        std::vector<double> yaw_deg;
         time_s.reserve(nominal_nav_.size());
         roll_deg.reserve(nominal_nav_.size());
         pitch_deg.reserve(nominal_nav_.size());
+        yaw_deg.reserve(nominal_nav_.size());
         for (const auto& nav : nominal_nav_) {
             if (nav.time < start_time || nav.time > end_time) {
                 continue;
@@ -1265,11 +1293,13 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
             time_s.push_back(nav.time);
             roll_deg.push_back(RollFromQuaternionNed(nav.q_nb) / kDegToRad);
             pitch_deg.push_back(PitchFromQuaternionNed(nav.q_nb) / kDegToRad);
+            yaw_deg.push_back(YawFromQuaternionNed(nav.q_nb) / kDegToRad);
         }
         debug_record.start_time_s = start_time;
         debug_record.end_time_s = time_s.empty() ? start_time : time_s.back();
         debug_record.roll_slope_deg_per_s = LinearSlopeLeastSquares(time_s, roll_deg);
         debug_record.pitch_slope_deg_per_s = LinearSlopeLeastSquares(time_s, pitch_deg);
+        debug_record.yaw_slope_deg_per_s = LinearSlopeLeastSquares(time_s, yaw_deg);
     }
     iteration_debug_records_.push_back(debug_record);
     return true;
@@ -1490,15 +1520,20 @@ bool System::SaveOutputs() const {
 
     const std::filesystem::path iteration_debug_path = config_.output_path / "outer_iteration_debug.txt";
     std::ofstream iteration_debug_ofs(iteration_debug_path);
-    iteration_debug_ofs << "# outer_iteration start_time_s end_time_s roll_slope_deg_per_s pitch_slope_deg_per_s max_dtheta_rad max_dbg_rps max_dba_mps2\n";
+    iteration_debug_ofs << "# outer_iteration start_time_s end_time_s gnss_residual_rms_before_m gnss_residual_rms_after_m roll_slope_deg_per_s pitch_slope_deg_per_s yaw_slope_deg_per_s max_dtheta_rad max_dv_mps max_dp_m max_dbg_rps max_dba_mps2\n";
     for (const auto& record : iteration_debug_records_) {
         iteration_debug_ofs << std::setprecision(17)
                             << record.outer_iteration << ' '
                             << record.start_time_s << ' '
                             << record.end_time_s << ' '
+                            << record.gnss_residual_rms_before_m << ' '
+                            << record.gnss_residual_rms_after_m << ' '
                             << record.roll_slope_deg_per_s << ' '
                             << record.pitch_slope_deg_per_s << ' '
+                            << record.yaw_slope_deg_per_s << ' '
                             << record.max_delta_theta_norm_rad << ' '
+                            << record.max_delta_vel_norm_mps << ' '
+                            << record.max_delta_pos_norm_m << ' '
                             << record.max_delta_bg_norm_rps << ' '
                             << record.max_delta_ba_norm_mps2 << '\n';
     }

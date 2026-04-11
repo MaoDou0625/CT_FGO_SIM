@@ -328,7 +328,7 @@ private:
         Eigen::LLT<Matrix15d> llt(info);
         Matrix15d sqrt_info = Matrix15d::Identity();
         if (llt.info() == Eigen::Success) {
-            sqrt_info = llt.matrixL();
+            sqrt_info = llt.matrixL().transpose();
         } else {
             sqrt_info.diagonal() =
                 Qd.diagonal().cwiseMax(1.0e-12).cwiseSqrt().cwiseInverse();

@@ -94,9 +94,14 @@ struct IterationDebugRecord {
     int outer_iteration = 0;
     double start_time_s = 0.0;
     double end_time_s = 0.0;
+    double gnss_residual_rms_before_m = 0.0;
+    double gnss_residual_rms_after_m = 0.0;
     double roll_slope_deg_per_s = 0.0;
     double pitch_slope_deg_per_s = 0.0;
+    double yaw_slope_deg_per_s = 0.0;
     double max_delta_theta_norm_rad = 0.0;
+    double max_delta_vel_norm_mps = 0.0;
+    double max_delta_pos_norm_m = 0.0;
     double max_delta_bg_norm_rps = 0.0;
     double max_delta_ba_norm_mps2 = 0.0;
 };
