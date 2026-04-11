@@ -432,9 +432,6 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     if (cfg["imu_stride"]) {
         config_.imu_stride = std::max(1, cfg["imu_stride"].as<int>());
     }
-    if (cfg["outer_iterations"]) {
-        config_.outer_iterations = std::max(0, cfg["outer_iterations"].as<int>());
-    }
     if (cfg["solver_max_iterations"]) {
         config_.solver_max_iterations = std::max(1, cfg["solver_max_iterations"].as<int>());
     }
@@ -618,7 +615,12 @@ bool System::Run() {
               << ", " << initial_alignment_.window_end_time << "]";
     LOG(INFO) << "Static alignment reference time: " << initial_alignment_.reference_time;
 
-    if (config_.enable_sliding_window_feedback && config_.outer_iterations == 0) {
+    if (!config_.enable_sliding_window_feedback) {
+        LOG(ERROR) << "Sliding-window feedback must be enabled; global batch solve path has been removed";
+        return false;
+    }
+
+    if (config_.enable_initial_yaw_feedback) {
         ApplyInitialYawFeedbackFromGnss();
         if (!ResetControlPointsFromNominalTrajectory(false)) {
             LOG(ERROR) << "Failed to reset control points after pre-sliding yaw feedback";
@@ -630,25 +632,6 @@ bool System::Run() {
         return false;
     }
 
-    for (int outer_iter = 0; outer_iter < config_.outer_iterations; ++outer_iter) {
-        LOG(INFO) << "Outer iteration " << (outer_iter + 1) << "/" << config_.outer_iterations;
-        if (!BuildAndSolveProblem()) {
-            return false;
-        }
-        if (outer_iter + 1 < config_.outer_iterations) {
-            ApplyInitialYawFeedbackFromGnss();
-        }
-        if (!InjectCurrentErrorStateIntoNominalTrajectory(outer_iter + 1)) {
-            LOG(ERROR) << "Failed to inject current error-state estimate into nominal trajectory";
-            return false;
-        }
-        if (outer_iter + 1 < config_.outer_iterations) {
-            if (!ResetControlPointsFromNominalTrajectory(false)) {
-                LOG(ERROR) << "Failed to reset control points from updated nominal trajectory";
-                return false;
-            }
-        }
-    }
     return SaveOutputs();
 }
 
@@ -665,7 +648,7 @@ void System::Describe() const {
     LOG(INFO) << "GNSS sigma(h/v): " << config_.gnss_sigma_horizontal_m << ", " << config_.gnss_sigma_vertical_m;
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
     LOG(INFO) << "IMU stride: " << config_.imu_stride;
-    LOG(INFO) << "Outer iterations: " << config_.outer_iterations;
+    LOG(INFO) << "Solver mode: sliding window only";
     LOG(INFO) << "Sliding window feedback: " << (config_.enable_sliding_window_feedback ? "true" : "false")
               << ", window=" << config_.sliding_window_s
               << " s, step=" << config_.sliding_window_step_s
@@ -1825,7 +1808,7 @@ bool System::SaveOutputs() const {
     summary_ofs << "error_state_dimension: 21\n";
     summary_ofs << "gyro_scale_rw_sigma: " << config_.gyro_scale_rw_sigma << '\n';
     summary_ofs << "accel_scale_rw_sigma: " << config_.accel_scale_rw_sigma << '\n';
-    summary_ofs << "outer_iterations: " << config_.outer_iterations << '\n';
+    summary_ofs << "solver_mode: sliding_window_only\n";
     summary_ofs << "enable_sliding_window_feedback: " << config_.enable_sliding_window_feedback << '\n';
     summary_ofs << "sliding_window_s: " << config_.sliding_window_s << '\n';
     summary_ofs << "sliding_window_step_s: " << config_.sliding_window_step_s << '\n';

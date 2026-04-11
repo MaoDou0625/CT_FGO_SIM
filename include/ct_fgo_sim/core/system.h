@@ -61,7 +61,6 @@ struct AppConfig {
     int initial_yaw_feedback_min_pairs = 10;
     double initial_yaw_feedback_max_abs_rad = 1.5707963267948966;
     int imu_stride = 10;
-    int outer_iterations = 1;
     int solver_max_iterations = 20;
     bool enable_sliding_window_feedback = false;
     double sliding_window_s = 20.0;
