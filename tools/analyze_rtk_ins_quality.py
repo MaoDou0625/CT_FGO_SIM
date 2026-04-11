@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import tempfile
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -57,14 +59,15 @@ def blh_rad_to_local_enu(blh_rad: np.ndarray, origin_blh_rad: np.ndarray) -> np.
     return np.column_stack([dx, dy, dz]) @ ecef_to_enu.T
 
 
-def load_nominal_nav(path: Path, origin_blh: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_nominal_nav(path: Path, origin_blh: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     data = np.loadtxt(path, comments="#")
     if data.ndim != 2 or data.shape[1] < 7:
         raise RuntimeError(f"Unexpected nominal_nav format: {path}")
     time_s = data[:, 0]
-    pos_enu = blh_rad_to_local_enu(data[:, 1:4], origin_blh)
+    blh = data[:, 1:4]
+    pos_enu = blh_rad_to_local_enu(blh, origin_blh)
     vel_enu = data[:, 4:7]
-    return time_s, pos_enu, vel_enu
+    return time_s, blh, pos_enu, vel_enu
 
 
 def load_rtk(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -331,6 +334,80 @@ def save_position_error_blh_plot(
     plt.close(fig)
 
 
+def save_blh_compare_plot(
+    output_png_path: Path,
+    output_fig_path: Path,
+    time_s: np.ndarray,
+    rtk_blh: np.ndarray,
+    nav_blh: np.ndarray,
+) -> None:
+    rtk_plot = np.column_stack((np.degrees(rtk_blh[:, 0]), np.degrees(rtk_blh[:, 1]), rtk_blh[:, 2]))
+    nav_plot = np.column_stack((np.degrees(nav_blh[:, 0]), np.degrees(nav_blh[:, 1]), nav_blh[:, 2]))
+    labels = ["Latitude (deg)", "Longitude (deg)", "Height (m)"]
+
+    fig, axes = plt.subplots(3, 1, figsize=(13, 8), sharex=True)
+    for axis_idx, ax in enumerate(axes):
+        ax.plot(time_s, rtk_plot[:, axis_idx], linewidth=1.0, label="RTK")
+        ax.plot(time_s, nav_plot[:, axis_idx], linewidth=1.0, label="Nav nominal")
+        ax.set_ylabel(labels[axis_idx])
+        ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+        ax.legend(loc="best")
+    axes[-1].set_xlabel("time (s)")
+    fig.suptitle("RTK and navigation BLH comparison")
+    fig.tight_layout()
+    fig.savefig(output_png_path, dpi=180)
+    plt.close(fig)
+
+    try:
+        save_blh_compare_matlab_fig(output_fig_path, time_s, rtk_plot, nav_plot, labels)
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        print(f"WARNING: failed to export MATLAB fig {output_fig_path}: {exc}")
+
+
+def save_blh_compare_matlab_fig(
+    output_fig_path: Path,
+    time_s: np.ndarray,
+    rtk_plot: np.ndarray,
+    nav_plot: np.ndarray,
+    labels: list[str],
+) -> None:
+    output_fig_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="ct_fgo_blh_fig_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        rtk_csv = tmp_dir / "rtk_blh.csv"
+        nav_csv = tmp_dir / "nav_blh.csv"
+        np.savetxt(rtk_csv, np.column_stack((time_s, rtk_plot)), delimiter=",")
+        np.savetxt(nav_csv, np.column_stack((time_s, nav_plot)), delimiter=",")
+
+        script_path = tmp_dir / "make_blh_fig.m"
+        lines = [
+            "rtk = readmatrix('{rtk_csv}');".format(rtk_csv=rtk_csv.as_posix()),
+            "nav = readmatrix('{nav_csv}');".format(nav_csv=nav_csv.as_posix()),
+            "fig = figure('Visible', 'off', 'Position', [100, 100, 1200, 800]);",
+            "tiledlayout(3,1);",
+        ]
+        for axis_idx, label in enumerate(labels, start=1):
+            lines.extend(
+                [
+                    f"nexttile({axis_idx});",
+                    f"plot(rtk(:,1), rtk(:,{axis_idx + 1}), 'LineWidth', 1.1, 'DisplayName', 'RTK'); hold on;",
+                    f"plot(nav(:,1), nav(:,{axis_idx + 1}), 'LineWidth', 1.1, 'DisplayName', 'Nav nominal');",
+                    "grid on; legend('Location','best');",
+                    f"ylabel('{label}');",
+                ]
+            )
+        lines.extend(
+            [
+                "xlabel('time (s)');",
+                "sgtitle('RTK and navigation BLH comparison');",
+                "savefig(fig, '{fig_path}');".format(fig_path=output_fig_path.as_posix()),
+                "close(fig); exit;",
+            ]
+        )
+        script_path.write_text("\n".join(lines), encoding="utf-8")
+        subprocess.run(["matlab", "-batch", f"run('{script_path.as_posix()}')"], check=True)
+
+
 def save_summary(
     output_path: Path,
     time_s: np.ndarray,
@@ -441,7 +518,7 @@ def main() -> None:
     args = parser.parse_args()
 
     rtk_time, rtk_blh, rtk_pos, rtk_std = load_rtk(args.rtk)
-    nav_time, nav_pos, nav_vel = load_nominal_nav(args.nominal_nav, rtk_blh[0])
+    nav_time, nav_blh, nav_pos, nav_vel = load_nominal_nav(args.nominal_nav, rtk_blh[0])
 
     start = max(float(rtk_time[0]), float(nav_time[0]))
     end = min(float(rtk_time[-1]), float(nav_time[-1]))
@@ -449,9 +526,11 @@ def main() -> None:
         raise RuntimeError(f"No common time span: [{start}, {end}]")
     mask = (rtk_time >= start) & (rtk_time <= end)
     time_s = rtk_time[mask]
+    rtk_blh = rtk_blh[mask]
     rtk_pos = rtk_pos[mask]
     rtk_std = rtk_std[mask]
 
+    nav_blh_interp = interpolate_rows(time_s, nav_time, nav_blh)
     nav_pos_interp = interpolate_rows(time_s, nav_time, nav_pos)
     nav_vel_interp = interpolate_rows(time_s, nav_time, nav_vel)
     rtk_vel = central_difference(time_s, rtk_pos)
@@ -511,6 +590,13 @@ def main() -> None:
         residual_pos,
         flags,
     )
+    save_blh_compare_plot(
+        args.output_dir / "rtk_nav_blh_compare.png",
+        args.output_dir / "rtk_nav_blh_compare.fig",
+        time_s,
+        rtk_blh,
+        nav_blh_interp,
+    )
     save_summary(
         args.output_dir / "rtk_ins_residual_summary.json",
         time_s,
@@ -539,6 +625,8 @@ def main() -> None:
     print(f"Wrote {args.output_dir / 'rtk_quality_flags.txt'}")
     print(f"Wrote {args.output_dir / 'rtk_ins_residual_diagnostics.png'}")
     print(f"Wrote {args.output_dir / 'rtk_position_error_blh_flags.png'}")
+    print(f"Wrote {args.output_dir / 'rtk_nav_blh_compare.png'}")
+    print(f"Wrote {args.output_dir / 'rtk_nav_blh_compare.fig'}")
     print(f"Wrote {args.output_dir / 'rtk_ins_residual_summary.json'}")
 
 
