@@ -434,7 +434,7 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
         config_.imu_stride = std::max(1, cfg["imu_stride"].as<int>());
     }
     if (cfg["outer_iterations"]) {
-        config_.outer_iterations = std::max(1, cfg["outer_iterations"].as<int>());
+        config_.outer_iterations = std::max(0, cfg["outer_iterations"].as<int>());
     }
     if (cfg["solver_max_iterations"]) {
         config_.solver_max_iterations = std::max(1, cfg["solver_max_iterations"].as<int>());
@@ -627,6 +627,14 @@ bool System::Run() {
     LOG(INFO) << "Static alignment window: [" << initial_alignment_.window_start_time
               << ", " << initial_alignment_.window_end_time << "]";
     LOG(INFO) << "Static alignment reference time: " << initial_alignment_.reference_time;
+
+    if (config_.enable_sliding_window_feedback && config_.outer_iterations == 0) {
+        ApplyInitialYawFeedbackFromGnss();
+        if (!ResetControlPointsFromNominalTrajectory(false)) {
+            LOG(ERROR) << "Failed to reset control points after pre-sliding yaw feedback";
+            return false;
+        }
+    }
 
     if (!RunSlidingWindowFeedback()) {
         return false;
