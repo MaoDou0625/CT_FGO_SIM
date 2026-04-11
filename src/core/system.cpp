@@ -450,6 +450,9 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
         if (sliding["step_s"]) {
             config_.sliding_window_step_s = std::max(config_.spline_dt_s, sliding["step_s"].as<double>());
         }
+        if (sliding["mature_s"]) {
+            config_.sliding_window_mature_s = std::max(config_.spline_dt_s, sliding["mature_s"].as<double>());
+        }
         if (sliding["max_windows"]) {
             config_.sliding_window_max_windows = std::max(0, sliding["max_windows"].as<int>());
         }
@@ -668,6 +671,7 @@ void System::Describe() const {
     LOG(INFO) << "Sliding window feedback: " << (config_.enable_sliding_window_feedback ? "true" : "false")
               << ", window=" << config_.sliding_window_s
               << " s, step=" << config_.sliding_window_step_s
+              << " s, mature=" << config_.sliding_window_mature_s
               << " s, max_windows=" << config_.sliding_window_max_windows;
     LOG(INFO) << "Error-state bridge factors: " << (config_.enable_error_state_bridge ? "true" : "false")
               << ", GNSS stride=" << config_.error_state_bridge_gnss_stride
@@ -825,6 +829,9 @@ bool System::RunSlidingWindowFeedback() {
     const double full_end = control_points_.back().Timestamp();
     const double window_s = std::max(config_.sliding_window_s, config_.spline_dt_s);
     const double step_s = std::max(config_.sliding_window_step_s, config_.spline_dt_s);
+    const double mature_s = config_.sliding_window_mature_s > 0.0
+        ? std::max(config_.sliding_window_mature_s, config_.spline_dt_s)
+        : step_s;
     int window_count = 0;
     for (double window_start = full_start; window_start < full_end - 1.0e-6; window_start += step_s) {
         const double window_end = std::min(window_start + window_s, full_end);
@@ -836,15 +843,21 @@ bool System::RunSlidingWindowFeedback() {
             break;
         }
 
+        const double inject_start = window_start;
+        const double inject_end = std::min(window_start + mature_s, window_end);
         LOG(INFO) << "Sliding-window feedback " << (window_count + 1)
-                  << ": [" << window_start << ", " << window_end << "]";
+                  << ": solve [" << window_start << ", " << window_end
+                  << "], inject mature [" << inject_start << ", " << inject_end << "]";
         if (!BuildAndSolveProblem(
                 window_start,
                 window_end,
                 config_.sliding_window_solver_max_iterations)) {
             return false;
         }
-        if (!InjectCurrentErrorStateIntoNominalTrajectory(-(window_count + 1))) {
+        if (!InjectCurrentErrorStateIntoNominalTrajectory(
+                -(window_count + 1),
+                inject_start,
+                inject_end)) {
             LOG(ERROR) << "Failed to inject sliding-window feedback";
             return false;
         }
@@ -1404,7 +1417,10 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
     return composed;
 }
 
-bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
+bool System::InjectCurrentErrorStateIntoNominalTrajectory(
+    int outer_iteration,
+    std::optional<double> inject_start_time,
+    std::optional<double> inject_end_time) {
     if (nominal_nav_.empty()) {
         LOG(ERROR) << "Cannot inject error state into an empty nominal trajectory";
         return false;
@@ -1423,10 +1439,20 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
         return false;
     }
 
-    auto compute_gnss_residual_rms = [this]() {
+    const bool use_inject_window = inject_start_time && inject_end_time;
+    const double inject_start = inject_start_time.value_or(nominal_nav_.front().time);
+    const double inject_end = inject_end_time.value_or(nominal_nav_.back().time);
+    auto in_inject_window = [&](double time) {
+        return !use_inject_window || (time >= inject_start && time <= inject_end);
+    };
+
+    auto compute_gnss_residual_rms = [this, &in_inject_window]() {
         double sum_sq = 0.0;
         int count = 0;
         for (const auto& gnss : gnss_) {
+            if (!in_inject_window(gnss.time)) {
+                continue;
+            }
             const auto nominal_state = EvaluateNominalState(nominal_nav_, gnss.time);
             if (!nominal_state) {
                 continue;
@@ -1450,6 +1476,9 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
     double max_delta_sa_norm = 0.0;
 
     for (auto& nominal_state : nominal_nav_) {
+        if (!in_inject_window(nominal_state.time)) {
+            continue;
+        }
         const auto delta_theta = EvaluateNodeValueAtTime(nominal_state.time, delta_theta_nodes_);
         const auto delta_vel = EvaluateNodeValueAtTime(nominal_state.time, delta_vel_nodes_);
         const auto delta_pos = EvaluateNodeValueAtTime(nominal_state.time, delta_pos_nodes_);
@@ -1480,7 +1509,7 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
         max_delta_sa_norm = std::max(max_delta_sa_norm, delta_sa->norm());
     }
 
-    if (!nominal_nav_.empty()) {
+    if (!nominal_nav_.empty() && in_inject_window(nominal_nav_.front().time)) {
         initial_alignment_.q_nb = nominal_nav_.front().q_nb;
         initial_alignment_.vel0_ned = nominal_nav_.front().vel_ned;
         initial_alignment_.bg0 = nominal_nav_.front().bg;
@@ -1533,7 +1562,9 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
 
     const double gnss_residual_rms_after = compute_gnss_residual_rms();
 
-    LOG(INFO) << "Injected error-state nodes into nominal trajectory, GNSS RMS "
+    LOG(INFO) << "Injected error-state nodes into nominal trajectory"
+              << (use_inject_window ? " over mature window" : "")
+              << " [" << inject_start << ", " << inject_end << "], GNSS RMS "
               << gnss_residual_rms_before << " -> " << gnss_residual_rms_after
               << " m, max |dtheta|="
               << max_delta_theta_norm << " rad, max |dv|=" << max_delta_vel_norm
@@ -1761,6 +1792,7 @@ bool System::SaveOutputs() const {
     summary_ofs << "enable_sliding_window_feedback: " << config_.enable_sliding_window_feedback << '\n';
     summary_ofs << "sliding_window_s: " << config_.sliding_window_s << '\n';
     summary_ofs << "sliding_window_step_s: " << config_.sliding_window_step_s << '\n';
+    summary_ofs << "sliding_window_mature_s: " << config_.sliding_window_mature_s << '\n';
     summary_ofs << "sliding_window_max_windows: " << config_.sliding_window_max_windows << '\n';
     summary_ofs << "sliding_window_solver_max_iterations: " << config_.sliding_window_solver_max_iterations << '\n';
     summary_ofs << "enable_error_state_bridge: " << config_.enable_error_state_bridge << '\n';

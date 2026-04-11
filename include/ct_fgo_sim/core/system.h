@@ -66,6 +66,7 @@ struct AppConfig {
     bool enable_sliding_window_feedback = false;
     double sliding_window_s = 20.0;
     double sliding_window_step_s = 5.0;
+    double sliding_window_mature_s = 0.0;
     int sliding_window_max_windows = 0;
     int sliding_window_solver_max_iterations = 5;
     bool enable_error_state_bridge = false;
@@ -143,7 +144,10 @@ private:
     bool SaveOutputs() const;
     bool ApplyInitialYawFeedbackFromGnss();
     bool ReestimateInitialBiasesFromStaticWindow();
-    bool InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration);
+    bool InjectCurrentErrorStateIntoNominalTrajectory(
+        int outer_iteration,
+        std::optional<double> inject_start_time = std::nullopt,
+        std::optional<double> inject_end_time = std::nullopt);
     std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
     std::optional<Vector3d> EvaluateNominalAccelAtTime(double time) const;
     std::optional<Vector3d> EvaluateNodeValueAtTime(
