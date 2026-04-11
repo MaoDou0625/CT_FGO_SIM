@@ -452,6 +452,9 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
         if (sliding["mature_s"]) {
             config_.sliding_window_mature_s = std::max(config_.spline_dt_s, sliding["mature_s"].as<double>());
         }
+        if (sliding["taper_s"]) {
+            config_.sliding_window_taper_s = std::max(0.0, sliding["taper_s"].as<double>());
+        }
         if (sliding["max_windows"]) {
             config_.sliding_window_max_windows = std::max(0, sliding["max_windows"].as<int>());
         }
@@ -667,6 +670,7 @@ void System::Describe() const {
               << ", window=" << config_.sliding_window_s
               << " s, step=" << config_.sliding_window_step_s
               << " s, mature=" << config_.sliding_window_mature_s
+              << " s, taper=" << config_.sliding_window_taper_s
               << " s, max_windows=" << config_.sliding_window_max_windows;
     LOG(INFO) << "Enable initial yaw feedback: " << (config_.enable_initial_yaw_feedback ? "true" : "false");
     LOG(INFO) << "Use GNSS factors: " << (config_.use_gnss_factors ? "true" : "false");
@@ -808,6 +812,75 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
     return !control_points_.empty();
 }
 
+bool System::RefreshControlPointsFromNominalTrajectory(double refresh_start_time, double refresh_end_time) {
+    if (nominal_nav_.empty()) {
+        LOG(ERROR) << "Cannot refresh control points from an empty nominal trajectory";
+        return false;
+    }
+    if (control_points_.empty()) {
+        LOG(ERROR) << "Cannot refresh an empty control-point array";
+        return false;
+    }
+    if (control_points_.size() != delta_theta_nodes_.size() ||
+        control_points_.size() != delta_vel_nodes_.size() ||
+        control_points_.size() != delta_pos_nodes_.size() ||
+        control_points_.size() != delta_bg_nodes_.size() ||
+        control_points_.size() != delta_ba_nodes_.size() ||
+        control_points_.size() != delta_sg_nodes_.size() ||
+        control_points_.size() != delta_sa_nodes_.size()) {
+        LOG(ERROR) << "Node arrays are inconsistent with control-point count during local refresh";
+        return false;
+    }
+    if (refresh_end_time < refresh_start_time) {
+        std::swap(refresh_start_time, refresh_end_time);
+    }
+
+    const double padding_s = 2.0 * std::max(config_.spline_dt_s, 1.0e-9);
+    const double refresh_start = refresh_start_time - padding_s;
+    const double refresh_end = refresh_end_time + padding_s;
+    int refreshed_count = 0;
+    for (auto& control_point : control_points_) {
+        const double t = control_point.Timestamp();
+        if (t < refresh_start || t > refresh_end) {
+            continue;
+        }
+        const auto nominal_state = EvaluateNominalState(nominal_nav_, t);
+        if (!nominal_state) {
+            continue;
+        }
+        const Vector3d local_ned = Earth::GlobalToLocal(origin_blh_, nominal_state->blh);
+        control_point.Pose() = Sophus::SE3d(nominal_state->q_nb, local_ned);
+        ++refreshed_count;
+    }
+
+    for (auto& delta_theta : delta_theta_nodes_) {
+        delta_theta.setZero();
+    }
+    for (auto& delta_vel : delta_vel_nodes_) {
+        delta_vel.setZero();
+    }
+    for (auto& delta_pos : delta_pos_nodes_) {
+        delta_pos.setZero();
+    }
+    for (auto& delta_bg : delta_bg_nodes_) {
+        delta_bg.setZero();
+    }
+    for (auto& delta_ba : delta_ba_nodes_) {
+        delta_ba.setZero();
+    }
+    for (auto& delta_sg : delta_sg_nodes_) {
+        delta_sg.setZero();
+    }
+    for (auto& delta_sa : delta_sa_nodes_) {
+        delta_sa.setZero();
+    }
+
+    LOG(INFO) << "Locally refreshed " << refreshed_count
+              << " control points from nominal trajectory over ["
+              << refresh_start << ", " << refresh_end << "]";
+    return refreshed_count > 0;
+}
+
 bool System::RunSlidingWindowFeedback() {
     if (!config_.enable_sliding_window_feedback) {
         return true;
@@ -853,8 +926,8 @@ bool System::RunSlidingWindowFeedback() {
             LOG(ERROR) << "Failed to inject sliding-window feedback";
             return false;
         }
-        if (!ResetControlPointsFromNominalTrajectory(false)) {
-            LOG(ERROR) << "Failed to reset control points after sliding-window feedback";
+        if (!RefreshControlPointsFromNominalTrajectory(inject_start, inject_end)) {
+            LOG(ERROR) << "Failed to locally refresh control points after sliding-window feedback";
             return false;
         }
         ++window_count;
@@ -1365,8 +1438,21 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(
     const bool use_inject_window = inject_start_time && inject_end_time;
     const double inject_start = inject_start_time.value_or(nominal_nav_.front().time);
     const double inject_end = inject_end_time.value_or(nominal_nav_.back().time);
+    const double inject_duration = std::max(0.0, inject_end - inject_start);
+    const double taper_s = use_inject_window
+        ? std::min(config_.sliding_window_taper_s, 0.5 * inject_duration)
+        : 0.0;
     auto in_inject_window = [&](double time) {
         return !use_inject_window || (time >= inject_start && time <= inject_end);
+    };
+    auto injection_weight = [&](double time) {
+        if (!use_inject_window || taper_s <= 1.0e-9) {
+            return 1.0;
+        }
+        const double start_u = std::clamp((time - inject_start) / taper_s, 0.0, 1.0);
+        const double end_u = std::clamp((inject_end - time) / taper_s, 0.0, 1.0);
+        const double u = std::min(start_u, end_u);
+        return u * u * (3.0 - 2.0 * u);
     };
 
     auto compute_gnss_residual_rms = [this, &in_inject_window]() {
@@ -1413,23 +1499,32 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(
             continue;
         }
 
-        const Sophus::SO3d nominal_rot(nominal_state.q_nb);
-        nominal_state.q_nb = (Sophus::SO3d::exp(*delta_theta) * nominal_rot).unit_quaternion();
-        nominal_state.vel_ned -= *delta_vel;
-        const Vector3d nominal_local_ned = Earth::GlobalToLocal(origin_blh_, nominal_state.blh);
-        nominal_state.blh = Earth::LocalToGlobal(origin_blh_, nominal_local_ned - *delta_pos);
-        nominal_state.bg += *delta_bg;
-        nominal_state.ba += *delta_ba;
-        nominal_state.sg += *delta_sg;
-        nominal_state.sa += *delta_sa;
+        const double weight = injection_weight(nominal_state.time);
+        const Vector3d weighted_delta_theta = weight * *delta_theta;
+        const Vector3d weighted_delta_vel = weight * *delta_vel;
+        const Vector3d weighted_delta_pos = weight * *delta_pos;
+        const Vector3d weighted_delta_bg = weight * *delta_bg;
+        const Vector3d weighted_delta_ba = weight * *delta_ba;
+        const Vector3d weighted_delta_sg = weight * *delta_sg;
+        const Vector3d weighted_delta_sa = weight * *delta_sa;
 
-        max_delta_theta_norm = std::max(max_delta_theta_norm, delta_theta->norm());
-        max_delta_vel_norm = std::max(max_delta_vel_norm, delta_vel->norm());
-        max_delta_pos_norm = std::max(max_delta_pos_norm, delta_pos->norm());
-        max_delta_bg_norm = std::max(max_delta_bg_norm, delta_bg->norm());
-        max_delta_ba_norm = std::max(max_delta_ba_norm, delta_ba->norm());
-        max_delta_sg_norm = std::max(max_delta_sg_norm, delta_sg->norm());
-        max_delta_sa_norm = std::max(max_delta_sa_norm, delta_sa->norm());
+        const Sophus::SO3d nominal_rot(nominal_state.q_nb);
+        nominal_state.q_nb = (Sophus::SO3d::exp(weighted_delta_theta) * nominal_rot).unit_quaternion();
+        nominal_state.vel_ned -= weighted_delta_vel;
+        const Vector3d nominal_local_ned = Earth::GlobalToLocal(origin_blh_, nominal_state.blh);
+        nominal_state.blh = Earth::LocalToGlobal(origin_blh_, nominal_local_ned - weighted_delta_pos);
+        nominal_state.bg += weighted_delta_bg;
+        nominal_state.ba += weighted_delta_ba;
+        nominal_state.sg += weighted_delta_sg;
+        nominal_state.sa += weighted_delta_sa;
+
+        max_delta_theta_norm = std::max(max_delta_theta_norm, weighted_delta_theta.norm());
+        max_delta_vel_norm = std::max(max_delta_vel_norm, weighted_delta_vel.norm());
+        max_delta_pos_norm = std::max(max_delta_pos_norm, weighted_delta_pos.norm());
+        max_delta_bg_norm = std::max(max_delta_bg_norm, weighted_delta_bg.norm());
+        max_delta_ba_norm = std::max(max_delta_ba_norm, weighted_delta_ba.norm());
+        max_delta_sg_norm = std::max(max_delta_sg_norm, weighted_delta_sg.norm());
+        max_delta_sa_norm = std::max(max_delta_sa_norm, weighted_delta_sa.norm());
     }
 
     if (!nominal_nav_.empty() && in_inject_window(nominal_nav_.front().time)) {
@@ -1489,7 +1584,7 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(
               << (use_inject_window ? " over mature window" : "")
               << " [" << inject_start << ", " << inject_end << "], GNSS RMS "
               << gnss_residual_rms_before << " -> " << gnss_residual_rms_after
-              << " m, max |dtheta|="
+              << " m, taper=" << taper_s << " s, max |dtheta|="
               << max_delta_theta_norm << " rad, max |dv|=" << max_delta_vel_norm
               << " m/s, max |dp|=" << max_delta_pos_norm << " m, max |dbg|="
               << max_delta_bg_norm << " rad/s, max |dba|=" << max_delta_ba_norm
@@ -1716,6 +1811,7 @@ bool System::SaveOutputs() const {
     summary_ofs << "sliding_window_s: " << config_.sliding_window_s << '\n';
     summary_ofs << "sliding_window_step_s: " << config_.sliding_window_step_s << '\n';
     summary_ofs << "sliding_window_mature_s: " << config_.sliding_window_mature_s << '\n';
+    summary_ofs << "sliding_window_taper_s: " << config_.sliding_window_taper_s << '\n';
     summary_ofs << "sliding_window_max_windows: " << config_.sliding_window_max_windows << '\n';
     summary_ofs << "sliding_window_solver_max_iterations: " << config_.sliding_window_solver_max_iterations << '\n';
     summary_ofs << "enable_initial_yaw_feedback: " << config_.enable_initial_yaw_feedback << '\n';

@@ -67,6 +67,7 @@ struct AppConfig {
     double sliding_window_s = 20.0;
     double sliding_window_step_s = 5.0;
     double sliding_window_mature_s = 0.0;
+    double sliding_window_taper_s = 0.0;
     int sliding_window_max_windows = 0;
     int sliding_window_solver_max_iterations = 5;
     bool use_gnss_factors = true;
@@ -133,6 +134,7 @@ private:
     void TrimMeasurementsToTimeWindow();
     bool InitializeControlPoints();
     bool ResetControlPointsFromNominalTrajectory(bool reset_biases);
+    bool RefreshControlPointsFromNominalTrajectory(double refresh_start_time, double refresh_end_time);
     bool RunSlidingWindowFeedback();
     bool BuildAndSolveProblem(
         std::optional<double> factor_start_time = std::nullopt,
