@@ -90,6 +90,17 @@ struct ComposedState {
     Vector3d delta_ba = Vector3d::Zero();
 };
 
+struct IterationDebugRecord {
+    int outer_iteration = 0;
+    double start_time_s = 0.0;
+    double end_time_s = 0.0;
+    double roll_slope_deg_per_s = 0.0;
+    double pitch_slope_deg_per_s = 0.0;
+    double max_delta_theta_norm_rad = 0.0;
+    double max_delta_bg_norm_rps = 0.0;
+    double max_delta_ba_norm_mps2 = 0.0;
+};
+
 class System {
 public:
     bool LoadConfig(const std::filesystem::path& config_path);
@@ -106,7 +117,8 @@ private:
     bool BuildAndSolveProblem();
     bool SaveOutputs() const;
     bool ApplyInitialYawFeedbackFromGnss();
-    bool InjectCurrentErrorStateIntoNominalTrajectory();
+    bool ReestimateInitialBiasesFromStaticWindow();
+    bool InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration);
     std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
     std::optional<Vector3d> EvaluateNominalAccelAtTime(double time) const;
     std::optional<Vector3d> EvaluateNodeValueAtTime(
@@ -137,6 +149,12 @@ private:
     IntervalPropagationCache interval_cache_;
     bool initial_yaw_feedback_applied_ = false;
     double initial_yaw_feedback_total_rad_ = 0.0;
-};
+    std::vector<IterationDebugRecord> iteration_debug_records_;
+    bool bias_reestimate_applied_ = false;
+    Vector3d bias_reestimate_old_bg0_ = Vector3d::Zero();
+    Vector3d bias_reestimate_old_ba0_ = Vector3d::Zero();
+    Vector3d bias_reestimate_new_bg0_ = Vector3d::Zero();
+    Vector3d bias_reestimate_new_ba0_ = Vector3d::Zero();
+  };
 
 }  // namespace ct_fgo_sim

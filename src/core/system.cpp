@@ -19,6 +19,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <numeric>
 #include <thread>
 
 namespace ct_fgo_sim {
@@ -50,6 +51,35 @@ double WrapAngleRad(double angle_rad) {
 double YawFromQuaternionNed(const Eigen::Quaterniond& q_nb) {
     const Eigen::Matrix3d rot = q_nb.toRotationMatrix();
     return std::atan2(rot(1, 0), rot(0, 0));
+}
+
+double RollFromQuaternionNed(const Eigen::Quaterniond& q_nb) {
+    const Eigen::Matrix3d rot = q_nb.toRotationMatrix();
+    return std::atan2(rot(2, 1), rot(2, 2));
+}
+
+double PitchFromQuaternionNed(const Eigen::Quaterniond& q_nb) {
+    const Eigen::Matrix3d rot = q_nb.toRotationMatrix();
+    return -std::asin(std::clamp(rot(2, 0), -1.0, 1.0));
+}
+
+double LinearSlopeLeastSquares(const std::vector<double>& x, const std::vector<double>& y) {
+    if (x.size() != y.size() || x.size() < 2) {
+        return 0.0;
+    }
+    const double x_mean = std::accumulate(x.begin(), x.end(), 0.0) / static_cast<double>(x.size());
+    const double y_mean = std::accumulate(y.begin(), y.end(), 0.0) / static_cast<double>(y.size());
+    double num = 0.0;
+    double den = 0.0;
+    for (size_t i = 0; i < x.size(); ++i) {
+        const double dx = x[i] - x_mean;
+        num += dx * (y[i] - y_mean);
+        den += dx * dx;
+    }
+    if (den <= 1.0e-12) {
+        return 0.0;
+    }
+    return num / den;
 }
 
 struct YawFeedbackSample {
@@ -528,7 +558,7 @@ bool System::Run() {
         if (outer_iter + 1 < config_.outer_iterations) {
             ApplyInitialYawFeedbackFromGnss();
         }
-        if (!InjectCurrentErrorStateIntoNominalTrajectory()) {
+        if (!InjectCurrentErrorStateIntoNominalTrajectory(outer_iter + 1)) {
             LOG(ERROR) << "Failed to inject current error-state estimate into nominal trajectory";
             return false;
         }
@@ -804,7 +834,10 @@ bool System::ApplyInitialYawFeedbackFromGnss() {
         return false;
     }
 
-    const double window_end_time = initial_alignment_.reference_time + config_.initial_yaw_feedback_window_s;
+    const bool use_global_heading_pairs = config_.initial_yaw_feedback_window_s < 0.0;
+    const double window_end_time = use_global_heading_pairs
+        ? std::numeric_limits<double>::infinity()
+        : initial_alignment_.reference_time + config_.initial_yaw_feedback_window_s;
     std::vector<YawFeedbackSample> samples;
     samples.reserve(gnss_.size());
 
@@ -815,7 +848,8 @@ bool System::ApplyInitialYawFeedbackFromGnss() {
         }
 
         const double mid_time = 0.5 * (gnss_[i].time + gnss_[i - 1].time);
-        if (mid_time < initial_alignment_.reference_time || mid_time > window_end_time) {
+        if (!use_global_heading_pairs &&
+            (mid_time < initial_alignment_.reference_time || mid_time > window_end_time)) {
             continue;
         }
 
@@ -841,7 +875,8 @@ bool System::ApplyInitialYawFeedbackFromGnss() {
 
     if (static_cast<int>(samples.size()) < config_.initial_yaw_feedback_min_pairs) {
         LOG(INFO) << "Skipping initial yaw feedback: only " << samples.size()
-                  << " RTK heading pairs in the start window";
+                  << " RTK heading pairs in the "
+                  << (use_global_heading_pairs ? "global scan" : "start window");
         return false;
     }
 
@@ -973,6 +1008,10 @@ bool System::ApplyInitialYawFeedbackFromGnss() {
     initial_yaw_feedback_applied_ = true;
     initial_yaw_feedback_total_rad_ += yaw_correction;
 
+    if (!ReestimateInitialBiasesFromStaticWindow()) {
+        LOG(WARNING) << "Failed to re-estimate initial biases after yaw feedback; keeping previous bg0/ba0";
+    }
+
     LOG(INFO) << "Injected initial yaw feedback from RTK heading, correction = "
               << yaw_correction << " rad (" << yaw_correction / kDegToRad << " deg)"
               << ", raw_pair_count = " << samples.size()
@@ -980,6 +1019,37 @@ bool System::ApplyInitialYawFeedbackFromGnss() {
               << ", robust_inlier_count = " << robust_inlier_count;
 
     UpdateNominalTrajectoryFromCurrentBiases();
+    return true;
+}
+
+bool System::ReestimateInitialBiasesFromStaticWindow() {
+    if (initial_alignment_.sample_count < 10 ||
+        initial_alignment_.accel_mean.norm() < 1.0e-6 ||
+        initial_alignment_.gyro_mean.norm() < 1.0e-9) {
+        return false;
+    }
+    const Vector3d gyro_mean = initial_alignment_.gyro_mean;
+    const Vector3d accel_mean = initial_alignment_.accel_mean;
+
+    const Eigen::Matrix3d c_nb = initial_alignment_.q_nb.toRotationMatrix();
+    const Vector3d wie_n = Earth::Iewn(origin_blh_.x());
+    const Vector3d expected_gyro_b = c_nb.transpose() * wie_n;
+    const Vector3d expected_accel_b =
+        c_nb.transpose() * Vector3d(0.0, 0.0, -Earth::Gravity(origin_blh_));
+
+    const Vector3d old_bg0 = initial_alignment_.bg0;
+    const Vector3d old_ba0 = initial_alignment_.ba0;
+    initial_alignment_.bg0 = gyro_mean - expected_gyro_b;
+    initial_alignment_.ba0 = accel_mean - expected_accel_b;
+    bias_reestimate_applied_ = true;
+    bias_reestimate_old_bg0_ = old_bg0;
+    bias_reestimate_old_ba0_ = old_ba0;
+    bias_reestimate_new_bg0_ = initial_alignment_.bg0;
+    bias_reestimate_new_ba0_ = initial_alignment_.ba0;
+
+    LOG(INFO) << "Re-estimated initial biases after yaw feedback, old bg0 = "
+              << old_bg0.transpose() << ", new bg0 = " << initial_alignment_.bg0.transpose()
+              << ", old ba0 = " << old_ba0.transpose() << ", new ba0 = " << initial_alignment_.ba0.transpose();
     return true;
 }
 
@@ -1077,7 +1147,7 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
     return composed;
 }
 
-bool System::InjectCurrentErrorStateIntoNominalTrajectory() {
+bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
     if (nominal_nav_.empty()) {
         LOG(ERROR) << "Cannot inject error state into an empty nominal trajectory";
         return false;
@@ -1172,6 +1242,36 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory() {
               << max_delta_theta_norm << " rad, max |dv|=" << max_delta_vel_norm
               << " m/s, max |dp|=" << max_delta_pos_norm << " m, max |dbg|="
               << max_delta_bg_norm << " rad/s, max |dba|=" << max_delta_ba_norm << " m/s^2";
+
+    IterationDebugRecord debug_record;
+    debug_record.outer_iteration = outer_iteration;
+    debug_record.max_delta_theta_norm_rad = max_delta_theta_norm;
+    debug_record.max_delta_bg_norm_rps = max_delta_bg_norm;
+    debug_record.max_delta_ba_norm_mps2 = max_delta_ba_norm;
+    if (!nominal_nav_.empty()) {
+        constexpr double kInitialWindowS = 20.0;
+        const double start_time = nominal_nav_.front().time;
+        const double end_time = start_time + kInitialWindowS;
+        std::vector<double> time_s;
+        std::vector<double> roll_deg;
+        std::vector<double> pitch_deg;
+        time_s.reserve(nominal_nav_.size());
+        roll_deg.reserve(nominal_nav_.size());
+        pitch_deg.reserve(nominal_nav_.size());
+        for (const auto& nav : nominal_nav_) {
+            if (nav.time < start_time || nav.time > end_time) {
+                continue;
+            }
+            time_s.push_back(nav.time);
+            roll_deg.push_back(RollFromQuaternionNed(nav.q_nb) / kDegToRad);
+            pitch_deg.push_back(PitchFromQuaternionNed(nav.q_nb) / kDegToRad);
+        }
+        debug_record.start_time_s = start_time;
+        debug_record.end_time_s = time_s.empty() ? start_time : time_s.back();
+        debug_record.roll_slope_deg_per_s = LinearSlopeLeastSquares(time_s, roll_deg);
+        debug_record.pitch_slope_deg_per_s = LinearSlopeLeastSquares(time_s, pitch_deg);
+    }
+    iteration_debug_records_.push_back(debug_record);
     return true;
 }
 
@@ -1289,6 +1389,11 @@ bool System::SaveOutputs() const {
     summary_ofs << "enable_initial_yaw_feedback: " << config_.enable_initial_yaw_feedback << '\n';
     summary_ofs << "initial_yaw_feedback_applied: " << initial_yaw_feedback_applied_ << '\n';
     summary_ofs << "initial_yaw_feedback_total_rad: " << initial_yaw_feedback_total_rad_ << '\n';
+    summary_ofs << "bias_reestimate_applied: " << bias_reestimate_applied_ << '\n';
+    summary_ofs << "bias_reestimate_old_bg0_rps: " << bias_reestimate_old_bg0_.transpose() << '\n';
+    summary_ofs << "bias_reestimate_old_ba0_mps2: " << bias_reestimate_old_ba0_.transpose() << '\n';
+    summary_ofs << "bias_reestimate_new_bg0_rps: " << bias_reestimate_new_bg0_.transpose() << '\n';
+    summary_ofs << "bias_reestimate_new_ba0_mps2: " << bias_reestimate_new_ba0_.transpose() << '\n';
     summary_ofs << "time_offset_s: " << time_offset_s_ << '\n';
     summary_ofs << "lever_arm_m: "
                 << lever_arm_.x() << ' '
@@ -1378,13 +1483,29 @@ bool System::SaveOutputs() const {
                   << composed->delta_bg.x() << ' '
                   << composed->delta_bg.y() << ' '
                   << composed->delta_bg.z() << ' '
-                  << composed->delta_ba.x() << ' '
-                  << composed->delta_ba.y() << ' '
-                  << composed->delta_ba.z() << '\n';
+                    << composed->delta_ba.x() << ' '
+                    << composed->delta_ba.y() << ' '
+                    << composed->delta_ba.z() << '\n';
+    }
+
+    const std::filesystem::path iteration_debug_path = config_.output_path / "outer_iteration_debug.txt";
+    std::ofstream iteration_debug_ofs(iteration_debug_path);
+    iteration_debug_ofs << "# outer_iteration start_time_s end_time_s roll_slope_deg_per_s pitch_slope_deg_per_s max_dtheta_rad max_dbg_rps max_dba_mps2\n";
+    for (const auto& record : iteration_debug_records_) {
+        iteration_debug_ofs << std::setprecision(17)
+                            << record.outer_iteration << ' '
+                            << record.start_time_s << ' '
+                            << record.end_time_s << ' '
+                            << record.roll_slope_deg_per_s << ' '
+                            << record.pitch_slope_deg_per_s << ' '
+                            << record.max_delta_theta_norm_rad << ' '
+                            << record.max_delta_bg_norm_rps << ' '
+                            << record.max_delta_ba_norm_mps2 << '\n';
     }
 
     LOG(INFO) << "Wrote outputs to " << config_.output_path.string();
-    return trajectory_ofs.good() && bias_ofs.good() && summary_ofs.good() && nominal_ofs.good() && delta_ofs.good();
+    return trajectory_ofs.good() && bias_ofs.good() && summary_ofs.good() &&
+           nominal_ofs.good() && delta_ofs.good() && iteration_debug_ofs.good();
 }
 
 }  // namespace ct_fgo_sim

@@ -312,6 +312,7 @@ StaticAlignmentResult EstimateInitialAlignment(
         result.reference_time = meas.time;
         ++count;
     }
+    result.sample_count = count;
 
     if (count < 10 || accel_mean.norm() < 1.0e-6 || gyro_mean.norm() < 1.0e-9) {
         return result;
@@ -319,6 +320,8 @@ StaticAlignmentResult EstimateInitialAlignment(
 
     gyro_mean /= static_cast<double>(count);
     accel_mean /= static_cast<double>(count);
+    result.gyro_mean = gyro_mean;
+    result.accel_mean = accel_mean;
 
     const Vector3d down_b = -accel_mean.normalized();
     const Vector3d down_n = Vector3d::UnitZ();

@@ -12,8 +12,11 @@ struct StaticAlignmentResult {
     double window_start_time = 0.0;
     double window_end_time = 0.0;
     double reference_time = 0.0;
+    int sample_count = 0;
     Vector3d vel0_ned = Vector3d::Zero();
     Quaterniond q_nb = Quaterniond::Identity();
+    Vector3d gyro_mean = Vector3d::Zero();
+    Vector3d accel_mean = Vector3d::Zero();
     Vector3d bg0 = Vector3d::Zero();
     Vector3d ba0 = Vector3d::Zero();
 };
