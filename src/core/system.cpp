@@ -364,6 +364,12 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
     if (cfg["accel_bias_rw_sigma"]) {
         config_.accel_bias_rw_sigma = cfg["accel_bias_rw_sigma"].as<double>();
     }
+    if (cfg["gyro_scale_rw_sigma"]) {
+        config_.gyro_scale_rw_sigma = cfg["gyro_scale_rw_sigma"].as<double>();
+    }
+    if (cfg["accel_scale_rw_sigma"]) {
+        config_.accel_scale_rw_sigma = cfg["accel_scale_rw_sigma"].as<double>();
+    }
     if (cfg["bias_tau_s"]) {
         config_.bias_tau_s = cfg["bias_tau_s"].as<double>();
     }
@@ -642,6 +648,8 @@ bool System::InitializeControlPoints() {
         initial_alignment_,
         {},
         {},
+        {},
+        {},
         {});
     if (nominal_nav_.empty()) {
         LOG(ERROR) << "Nominal mechanization propagation failed";
@@ -669,17 +677,23 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
     AlignedVec3Array new_delta_pos(new_control_points.size(), Vector3d::Zero());
     AlignedVec3Array new_delta_bg(new_control_points.size(), Vector3d::Zero());
     AlignedVec3Array new_delta_ba(new_control_points.size(), Vector3d::Zero());
+    AlignedVec3Array new_delta_sg(new_control_points.size(), Vector3d::Zero());
+    AlignedVec3Array new_delta_sa(new_control_points.size(), Vector3d::Zero());
     if (!reset_biases) {
         if (delta_theta_nodes_.size() == new_control_points.size() &&
             delta_vel_nodes_.size() == new_control_points.size() &&
             delta_pos_nodes_.size() == new_control_points.size() &&
             delta_bg_nodes_.size() == new_control_points.size() &&
-            delta_ba_nodes_.size() == new_control_points.size()) {
+            delta_ba_nodes_.size() == new_control_points.size() &&
+            delta_sg_nodes_.size() == new_control_points.size() &&
+            delta_sa_nodes_.size() == new_control_points.size()) {
             new_delta_theta = delta_theta_nodes_;
             new_delta_vel = delta_vel_nodes_;
             new_delta_pos = delta_pos_nodes_;
             new_delta_bg = delta_bg_nodes_;
             new_delta_ba = delta_ba_nodes_;
+            new_delta_sg = delta_sg_nodes_;
+            new_delta_sa = delta_sa_nodes_;
         } else {
             LOG(WARNING) << "Delta-state node count changed from " << delta_theta_nodes_.size()
                          << " to " << new_control_points.size()
@@ -693,6 +707,8 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
     delta_pos_nodes_ = std::move(new_delta_pos);
     delta_bg_nodes_ = std::move(new_delta_bg);
     delta_ba_nodes_ = std::move(new_delta_ba);
+    delta_sg_nodes_ = std::move(new_delta_sg);
+    delta_sa_nodes_ = std::move(new_delta_sa);
     try {
         BuildIntervalPropagationCache(
             imu_,
@@ -702,6 +718,8 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
             config_.imu_sigma_accel_mps2,
             config_.gyro_bias_rw_sigma,
             config_.accel_bias_rw_sigma,
+            config_.gyro_scale_rw_sigma,
+            config_.accel_scale_rw_sigma,
             config_.bias_tau_s,
             interval_cache_);
     } catch (const std::exception& ex) {
@@ -736,6 +754,12 @@ bool System::BuildAndSolveProblem() {
     for (auto& delta_ba : delta_ba_nodes_) {
         problem.AddParameterBlock(delta_ba.data(), 3);
     }
+    for (auto& delta_sg : delta_sg_nodes_) {
+        problem.AddParameterBlock(delta_sg.data(), 3);
+    }
+    for (auto& delta_sa : delta_sa_nodes_) {
+        problem.AddParameterBlock(delta_sa.data(), 3);
+    }
     problem.AddParameterBlock(&time_offset_s_, 1);
     problem.AddParameterBlock(q_body_imu_.coeffs().data(), 4, new ceres::EigenQuaternionManifold);
     problem.SetParameterBlockConstant(delta_theta_nodes_.front().data());
@@ -743,6 +767,8 @@ bool System::BuildAndSolveProblem() {
     problem.SetParameterBlockConstant(delta_pos_nodes_.front().data());
     problem.SetParameterBlockConstant(delta_bg_nodes_.front().data());
     problem.SetParameterBlockConstant(delta_ba_nodes_.front().data());
+    problem.SetParameterBlockConstant(delta_sg_nodes_.front().data());
+    problem.SetParameterBlockConstant(delta_sa_nodes_.front().data());
     problem.SetParameterBlockConstant(&time_offset_s_);
     problem.SetParameterBlockConstant(q_body_imu_.coeffs().data());
 
@@ -804,11 +830,15 @@ bool System::BuildAndSolveProblem() {
                 delta_pos_nodes_[i].data(),
                 delta_bg_nodes_[i].data(),
                 delta_ba_nodes_[i].data(),
+                delta_sg_nodes_[i].data(),
+                delta_sa_nodes_[i].data(),
                 delta_theta_nodes_[i + 1].data(),
                 delta_vel_nodes_[i + 1].data(),
                 delta_pos_nodes_[i + 1].data(),
                 delta_bg_nodes_[i + 1].data(),
-                delta_ba_nodes_[i + 1].data());
+                delta_ba_nodes_[i + 1].data(),
+                delta_sg_nodes_[i + 1].data(),
+                delta_sa_nodes_[i + 1].data());
             ++process_factor_count;
         }
     }
@@ -1117,10 +1147,12 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
     const auto delta_pos = EvaluateNodeValueAtTime(time, delta_pos_nodes_);
     const auto delta_bg = EvaluateNodeValueAtTime(time, delta_bg_nodes_);
     const auto delta_ba = EvaluateNodeValueAtTime(time, delta_ba_nodes_);
+    const auto delta_sg = EvaluateNodeValueAtTime(time, delta_sg_nodes_);
+    const auto delta_sa = EvaluateNodeValueAtTime(time, delta_sa_nodes_);
     const auto delta_theta_dot = EvaluateNodeDerivativeAtTime(time, delta_theta_nodes_);
     const auto nominal_accel = EvaluateNominalAccelAtTime(time);
     const auto nominal_gyro = EvaluateNominalGyroCenterAtTime(time);
-    if (!delta_theta || !delta_vel || !delta_pos || !delta_bg || !delta_ba ||
+    if (!delta_theta || !delta_vel || !delta_pos || !delta_bg || !delta_ba || !delta_sg || !delta_sa ||
         !delta_theta_dot || !nominal_accel || !nominal_gyro) {
         return std::nullopt;
     }
@@ -1136,6 +1168,8 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
     composed.delta_pos_ned = *delta_pos;
     composed.delta_bg = *delta_bg;
     composed.delta_ba = *delta_ba;
+    composed.delta_sg = *delta_sg;
+    composed.delta_sa = *delta_sa;
     composed.full_pose = Sophus::SE3d(full_rot, nominal_local_ned - *delta_pos);
     composed.full_vel_ned = nominal_state->vel_ned - *delta_vel;
     composed.full_vel_body = full_rot.inverse() * composed.full_vel_ned;
@@ -1144,6 +1178,8 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
     composed.full_alpha_body = Vector3d::Zero();
     composed.full_bg = nominal_state->bg + *delta_bg;
     composed.full_ba = nominal_state->ba + *delta_ba;
+    composed.full_sg = nominal_state->sg + *delta_sg;
+    composed.full_sa = nominal_state->sa + *delta_sa;
     return composed;
 }
 
@@ -1159,7 +1195,9 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
         control_points_.size() != delta_vel_nodes_.size() ||
         control_points_.size() != delta_pos_nodes_.size() ||
         control_points_.size() != delta_bg_nodes_.size() ||
-        control_points_.size() != delta_ba_nodes_.size()) {
+        control_points_.size() != delta_ba_nodes_.size() ||
+        control_points_.size() != delta_sg_nodes_.size() ||
+        control_points_.size() != delta_sa_nodes_.size()) {
         LOG(ERROR) << "Node arrays are inconsistent with control-point count during error-state injection";
         return false;
     }
@@ -1187,6 +1225,8 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
     double max_delta_pos_norm = 0.0;
     double max_delta_bg_norm = 0.0;
     double max_delta_ba_norm = 0.0;
+    double max_delta_sg_norm = 0.0;
+    double max_delta_sa_norm = 0.0;
 
     for (auto& nominal_state : nominal_nav_) {
         const auto delta_theta = EvaluateNodeValueAtTime(nominal_state.time, delta_theta_nodes_);
@@ -1194,7 +1234,9 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
         const auto delta_pos = EvaluateNodeValueAtTime(nominal_state.time, delta_pos_nodes_);
         const auto delta_bg = EvaluateNodeValueAtTime(nominal_state.time, delta_bg_nodes_);
         const auto delta_ba = EvaluateNodeValueAtTime(nominal_state.time, delta_ba_nodes_);
-        if (!delta_theta || !delta_vel || !delta_pos || !delta_bg || !delta_ba) {
+        const auto delta_sg = EvaluateNodeValueAtTime(nominal_state.time, delta_sg_nodes_);
+        const auto delta_sa = EvaluateNodeValueAtTime(nominal_state.time, delta_sa_nodes_);
+        if (!delta_theta || !delta_vel || !delta_pos || !delta_bg || !delta_ba || !delta_sg || !delta_sa) {
             continue;
         }
 
@@ -1205,12 +1247,16 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
         nominal_state.blh = Earth::LocalToGlobal(origin_blh_, nominal_local_ned - *delta_pos);
         nominal_state.bg += *delta_bg;
         nominal_state.ba += *delta_ba;
+        nominal_state.sg += *delta_sg;
+        nominal_state.sa += *delta_sa;
 
         max_delta_theta_norm = std::max(max_delta_theta_norm, delta_theta->norm());
         max_delta_vel_norm = std::max(max_delta_vel_norm, delta_vel->norm());
         max_delta_pos_norm = std::max(max_delta_pos_norm, delta_pos->norm());
         max_delta_bg_norm = std::max(max_delta_bg_norm, delta_bg->norm());
         max_delta_ba_norm = std::max(max_delta_ba_norm, delta_ba->norm());
+        max_delta_sg_norm = std::max(max_delta_sg_norm, delta_sg->norm());
+        max_delta_sa_norm = std::max(max_delta_sa_norm, delta_sa->norm());
     }
 
     if (!nominal_nav_.empty()) {
@@ -1236,6 +1282,12 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
     for (auto& delta_ba : delta_ba_nodes_) {
         delta_ba.setZero();
     }
+    for (auto& delta_sg : delta_sg_nodes_) {
+        delta_sg.setZero();
+    }
+    for (auto& delta_sa : delta_sa_nodes_) {
+        delta_sa.setZero();
+    }
 
     try {
         BuildIntervalPropagationCache(
@@ -1246,6 +1298,8 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
             config_.imu_sigma_accel_mps2,
             config_.gyro_bias_rw_sigma,
             config_.accel_bias_rw_sigma,
+            config_.gyro_scale_rw_sigma,
+            config_.accel_scale_rw_sigma,
             config_.bias_tau_s,
             interval_cache_);
     } catch (const std::exception& ex) {
@@ -1263,7 +1317,9 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
               << " m, max |dtheta|="
               << max_delta_theta_norm << " rad, max |dv|=" << max_delta_vel_norm
               << " m/s, max |dp|=" << max_delta_pos_norm << " m, max |dbg|="
-              << max_delta_bg_norm << " rad/s, max |dba|=" << max_delta_ba_norm << " m/s^2";
+              << max_delta_bg_norm << " rad/s, max |dba|=" << max_delta_ba_norm
+              << " m/s^2, max |dsg|=" << max_delta_sg_norm
+              << ", max |dsa|=" << max_delta_sa_norm;
 
     IterationDebugRecord debug_record;
     debug_record.outer_iteration = outer_iteration;
@@ -1274,6 +1330,8 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(int outer_iteration) {
     debug_record.max_delta_pos_norm_m = max_delta_pos_norm;
     debug_record.max_delta_bg_norm_rps = max_delta_bg_norm;
     debug_record.max_delta_ba_norm_mps2 = max_delta_ba_norm;
+    debug_record.max_delta_sg_norm = max_delta_sg_norm;
+    debug_record.max_delta_sa_norm = max_delta_sa_norm;
     if (!nominal_nav_.empty()) {
         constexpr double kInitialWindowS = 20.0;
         const double start_time = nominal_nav_.front().time;
@@ -1310,27 +1368,41 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
     bias_times.reserve(control_points_.size());
     AlignedVec3Array full_bg_nodes;
     AlignedVec3Array full_ba_nodes;
+    AlignedVec3Array full_sg_nodes;
+    AlignedVec3Array full_sa_nodes;
     full_bg_nodes.reserve(control_points_.size());
     full_ba_nodes.reserve(control_points_.size());
+    full_sg_nodes.reserve(control_points_.size());
+    full_sa_nodes.reserve(control_points_.size());
     for (const auto& control_point : control_points_) {
         bias_times.push_back(control_point.Timestamp());
     }
 
     double max_delta_bg_norm = 0.0;
     double max_delta_ba_norm = 0.0;
+    double max_delta_sg_norm = 0.0;
+    double max_delta_sa_norm = 0.0;
     if (!control_points_.empty() &&
         control_points_.size() == delta_bg_nodes_.size() &&
-        control_points_.size() == delta_ba_nodes_.size()) {
+        control_points_.size() == delta_ba_nodes_.size() &&
+        control_points_.size() == delta_sg_nodes_.size() &&
+        control_points_.size() == delta_sa_nodes_.size()) {
         for (size_t i = 0; i < control_points_.size(); ++i) {
             full_bg_nodes.push_back(initial_alignment_.bg0 + delta_bg_nodes_[i]);
             full_ba_nodes.push_back(initial_alignment_.ba0 + delta_ba_nodes_[i]);
+            full_sg_nodes.push_back(delta_sg_nodes_[i]);
+            full_sa_nodes.push_back(delta_sa_nodes_[i]);
             max_delta_bg_norm = std::max(max_delta_bg_norm, delta_bg_nodes_[i].norm());
             max_delta_ba_norm = std::max(max_delta_ba_norm, delta_ba_nodes_[i].norm());
+            max_delta_sg_norm = std::max(max_delta_sg_norm, delta_sg_nodes_[i].norm());
+            max_delta_sa_norm = std::max(max_delta_sa_norm, delta_sa_nodes_[i].norm());
         }
     } else {
         for (size_t i = 0; i < control_points_.size(); ++i) {
             full_bg_nodes.push_back(initial_alignment_.bg0);
             full_ba_nodes.push_back(initial_alignment_.ba0);
+            full_sg_nodes.push_back(Vector3d::Zero());
+            full_sa_nodes.push_back(Vector3d::Zero());
         }
     }
 
@@ -1340,18 +1412,30 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
         initial_alignment_,
         bias_times,
         full_bg_nodes,
-        full_ba_nodes);
+        full_ba_nodes,
+        full_sg_nodes,
+        full_sa_nodes);
 
     if (!control_points_.empty() &&
         control_points_.size() == delta_bg_nodes_.size() &&
-        control_points_.size() == delta_ba_nodes_.size()) {
+        control_points_.size() == delta_ba_nodes_.size() &&
+        control_points_.size() == delta_sg_nodes_.size() &&
+        control_points_.size() == delta_sa_nodes_.size()) {
         LOG(INFO) << "Closed-loop bias feedback injected into nominal mechanization, max |delta_bg|="
-                  << max_delta_bg_norm << " rad/s, max |delta_ba|=" << max_delta_ba_norm << " m/s^2";
+                  << max_delta_bg_norm << " rad/s, max |delta_ba|=" << max_delta_ba_norm
+                  << " m/s^2, max |delta_sg|=" << max_delta_sg_norm
+                  << ", max |delta_sa|=" << max_delta_sa_norm;
         for (auto& delta_bg : delta_bg_nodes_) {
             delta_bg.setZero();
         }
         for (auto& delta_ba : delta_ba_nodes_) {
             delta_ba.setZero();
+        }
+        for (auto& delta_sg : delta_sg_nodes_) {
+            delta_sg.setZero();
+        }
+        for (auto& delta_sa : delta_sa_nodes_) {
+            delta_sa.setZero();
         }
     }
 
@@ -1365,6 +1449,8 @@ void System::UpdateNominalTrajectoryFromCurrentBiases() {
                 config_.imu_sigma_accel_mps2,
                 config_.gyro_bias_rw_sigma,
                 config_.accel_bias_rw_sigma,
+                config_.gyro_scale_rw_sigma,
+                config_.accel_scale_rw_sigma,
                 config_.bias_tau_s,
                 interval_cache_);
         } catch (const std::exception& ex) {
@@ -1398,11 +1484,13 @@ bool System::SaveOutputs() const {
 
     const std::filesystem::path bias_path = config_.output_path / "bias_nodes.txt";
     std::ofstream bias_ofs(bias_path);
-    bias_ofs << "# time_s d_bgx d_bgy d_bgz d_bax d_bay d_baz\n";
+    bias_ofs << "# time_s d_bgx d_bgy d_bgz d_bax d_bay d_baz d_sgx d_sgy d_sgz d_sax d_say d_saz\n";
     for (size_t i = 0; i < control_points_.size(); ++i) {
         bias_ofs << control_points_[i].Timestamp() << ' '
                  << delta_bg_nodes_[i].x() << ' ' << delta_bg_nodes_[i].y() << ' ' << delta_bg_nodes_[i].z() << ' '
-                 << delta_ba_nodes_[i].x() << ' ' << delta_ba_nodes_[i].y() << ' ' << delta_ba_nodes_[i].z() << '\n';
+                 << delta_ba_nodes_[i].x() << ' ' << delta_ba_nodes_[i].y() << ' ' << delta_ba_nodes_[i].z() << ' '
+                 << delta_sg_nodes_[i].x() << ' ' << delta_sg_nodes_[i].y() << ' ' << delta_sg_nodes_[i].z() << ' '
+                 << delta_sa_nodes_[i].x() << ' ' << delta_sa_nodes_[i].y() << ' ' << delta_sa_nodes_[i].z() << '\n';
     }
 
     const std::filesystem::path summary_path = config_.output_path / "run_summary.txt";
@@ -1415,6 +1503,9 @@ bool System::SaveOutputs() const {
     summary_ofs << "gnss_count: " << gnss_.size() << '\n';
     summary_ofs << "imu_count: " << imu_.size() << '\n';
     summary_ofs << "control_point_count: " << control_points_.size() << '\n';
+    summary_ofs << "error_state_dimension: 21\n";
+    summary_ofs << "gyro_scale_rw_sigma: " << config_.gyro_scale_rw_sigma << '\n';
+    summary_ofs << "accel_scale_rw_sigma: " << config_.accel_scale_rw_sigma << '\n';
     summary_ofs << "outer_iterations: " << config_.outer_iterations << '\n';
     summary_ofs << "enable_initial_yaw_feedback: " << config_.enable_initial_yaw_feedback << '\n';
     summary_ofs << "initial_yaw_feedback_applied: " << initial_yaw_feedback_applied_ << '\n';
@@ -1464,7 +1555,7 @@ bool System::SaveOutputs() const {
 
     const std::filesystem::path nominal_path = config_.output_path / "nominal_nav.txt";
     std::ofstream nominal_ofs(nominal_path);
-    nominal_ofs << "# time_s lat_rad lon_rad h_m ve_mps vn_mps vu_mps qx qy qz qw bgx bgy bgz bax bay baz\n";
+    nominal_ofs << "# time_s lat_rad lon_rad h_m ve_mps vn_mps vu_mps qx qy qz qw bgx bgy bgz bax bay baz sgx sgy sgz sax say saz\n";
     for (const auto& nav : nominal_nav_) {
         const Vector3d vel_enu = NedToEnu(nav.vel_ned);
         const Eigen::Quaterniond q_enu = QnbNedToQebEnu(nav.q_nb);
@@ -1485,13 +1576,19 @@ bool System::SaveOutputs() const {
                     << nav.bg.z() << ' '
                     << nav.ba.x() << ' '
                     << nav.ba.y() << ' '
-                    << nav.ba.z() << '\n';
+                    << nav.ba.z() << ' '
+                    << nav.sg.x() << ' '
+                    << nav.sg.y() << ' '
+                    << nav.sg.z() << ' '
+                    << nav.sa.x() << ' '
+                    << nav.sa.y() << ' '
+                    << nav.sa.z() << '\n';
     }
 
     const std::filesystem::path delta_path = config_.output_path / "delta_estimates.txt";
     std::ofstream delta_ofs(delta_path);
     delta_ofs << "# time_s dtheta_x_rad dtheta_y_rad dtheta_z_rad "
-                 "dvx_mps dvy_mps dvz_mps dpx_m dpy_m dpz_m dbg_x_rps dbg_y_rps dbg_z_rps dba_x dba_y dba_z\n";
+                 "dvx_mps dvy_mps dvz_mps dpx_m dpy_m dpz_m dbg_x_rps dbg_y_rps dbg_z_rps dba_x dba_y dba_z dsg_x dsg_y dsg_z dsa_x dsa_y dsa_z\n";
     for (int imu_index = 0; imu_index < static_cast<int>(imu_.size()); imu_index += config_.imu_stride) {
         const auto composed = EvaluateComposedState(imu_[imu_index].time);
         if (!composed) {
@@ -1513,14 +1610,20 @@ bool System::SaveOutputs() const {
                   << composed->delta_bg.x() << ' '
                   << composed->delta_bg.y() << ' '
                   << composed->delta_bg.z() << ' '
-                    << composed->delta_ba.x() << ' '
-                    << composed->delta_ba.y() << ' '
-                    << composed->delta_ba.z() << '\n';
+                  << composed->delta_ba.x() << ' '
+                  << composed->delta_ba.y() << ' '
+                  << composed->delta_ba.z() << ' '
+                  << composed->delta_sg.x() << ' '
+                  << composed->delta_sg.y() << ' '
+                  << composed->delta_sg.z() << ' '
+                  << composed->delta_sa.x() << ' '
+                  << composed->delta_sa.y() << ' '
+                  << composed->delta_sa.z() << '\n';
     }
 
     const std::filesystem::path iteration_debug_path = config_.output_path / "outer_iteration_debug.txt";
     std::ofstream iteration_debug_ofs(iteration_debug_path);
-    iteration_debug_ofs << "# outer_iteration start_time_s end_time_s gnss_residual_rms_before_m gnss_residual_rms_after_m roll_slope_deg_per_s pitch_slope_deg_per_s yaw_slope_deg_per_s max_dtheta_rad max_dv_mps max_dp_m max_dbg_rps max_dba_mps2\n";
+    iteration_debug_ofs << "# outer_iteration start_time_s end_time_s gnss_residual_rms_before_m gnss_residual_rms_after_m roll_slope_deg_per_s pitch_slope_deg_per_s yaw_slope_deg_per_s max_dtheta_rad max_dv_mps max_dp_m max_dbg_rps max_dba_mps2 max_dsg max_dsa\n";
     for (const auto& record : iteration_debug_records_) {
         iteration_debug_ofs << std::setprecision(17)
                             << record.outer_iteration << ' '
@@ -1535,7 +1638,9 @@ bool System::SaveOutputs() const {
                             << record.max_delta_vel_norm_mps << ' '
                             << record.max_delta_pos_norm_m << ' '
                             << record.max_delta_bg_norm_rps << ' '
-                            << record.max_delta_ba_norm_mps2 << '\n';
+                            << record.max_delta_ba_norm_mps2 << ' '
+                            << record.max_delta_sg_norm << ' '
+                            << record.max_delta_sa_norm << '\n';
     }
 
     LOG(INFO) << "Wrote outputs to " << config_.output_path.string();

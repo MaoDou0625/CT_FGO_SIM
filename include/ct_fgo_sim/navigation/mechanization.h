@@ -29,6 +29,8 @@ struct NominalNavState {
     Quaterniond q_nb = Quaterniond::Identity();
     Vector3d bg = Vector3d::Zero();
     Vector3d ba = Vector3d::Zero();
+    Vector3d sg = Vector3d::Zero();
+    Vector3d sa = Vector3d::Zero();
 };
 
 using NominalNavStates = std::vector<NominalNavState, Eigen::aligned_allocator<NominalNavState>>;
@@ -44,7 +46,9 @@ NominalNavStates PropagateNominalTrajectory(
     const StaticAlignmentResult& alignment,
     const std::vector<double>& bias_times,
     const AlignedVec3Array& gyro_biases,
-    const AlignedVec3Array& accel_biases);
+    const AlignedVec3Array& accel_biases,
+    const AlignedVec3Array& gyro_scales = {},
+    const AlignedVec3Array& accel_scales = {});
 
 std::optional<NominalNavState> EvaluateNominalState(
     const NominalNavStates& states,

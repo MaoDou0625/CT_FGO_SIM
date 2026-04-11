@@ -52,6 +52,8 @@ struct AppConfig {
     double imu_sigma_gyro_rps = 0.01;
     double gyro_bias_rw_sigma = 1.0e-4;
     double accel_bias_rw_sigma = 1.0e-3;
+    double gyro_scale_rw_sigma = 1.0e-3;
+    double accel_scale_rw_sigma = 1.0e-3;
     double bias_tau_s = 3600.0;
     bool enable_initial_yaw_feedback = false;
     double initial_yaw_feedback_window_s = 20.0;
@@ -83,11 +85,15 @@ struct ComposedState {
     Vector3d full_alpha_body = Vector3d::Zero();
     Vector3d full_bg = Vector3d::Zero();
     Vector3d full_ba = Vector3d::Zero();
+    Vector3d full_sg = Vector3d::Zero();
+    Vector3d full_sa = Vector3d::Zero();
     Vector3d delta_theta = Vector3d::Zero();
     Vector3d delta_vel_ned = Vector3d::Zero();
     Vector3d delta_pos_ned = Vector3d::Zero();
     Vector3d delta_bg = Vector3d::Zero();
     Vector3d delta_ba = Vector3d::Zero();
+    Vector3d delta_sg = Vector3d::Zero();
+    Vector3d delta_sa = Vector3d::Zero();
 };
 
 struct IterationDebugRecord {
@@ -104,6 +110,8 @@ struct IterationDebugRecord {
     double max_delta_pos_norm_m = 0.0;
     double max_delta_bg_norm_rps = 0.0;
     double max_delta_ba_norm_mps2 = 0.0;
+    double max_delta_sg_norm = 0.0;
+    double max_delta_sa_norm = 0.0;
 };
 
 class System {
@@ -143,6 +151,8 @@ private:
     AlignedVec3Array delta_pos_nodes_;
     AlignedVec3Array delta_bg_nodes_;
     AlignedVec3Array delta_ba_nodes_;
+    AlignedVec3Array delta_sg_nodes_;
+    AlignedVec3Array delta_sa_nodes_;
     Vector3d lever_arm_ = Vector3d::Zero();
     Eigen::Quaterniond initial_q_body_imu_ = Eigen::Quaterniond::Identity();
     Eigen::Quaterniond q_body_imu_ = Eigen::Quaterniond::Identity();

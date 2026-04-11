@@ -10,6 +10,12 @@
 
 namespace ct_fgo_sim {
 
+inline constexpr int kErrorStateDim = 21;
+inline constexpr int kErrorNoiseDim = 18;
+using ErrorStateMatrix = Eigen::Matrix<double, kErrorStateDim, kErrorStateDim>;
+using ErrorNoiseMatrix = Eigen::Matrix<double, kErrorNoiseDim, kErrorNoiseDim>;
+using ErrorStateNoiseMatrix = Eigen::Matrix<double, kErrorStateDim, kErrorNoiseDim>;
+
 struct NominalImuInterval {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     double start_time = 0.0;
@@ -30,9 +36,9 @@ struct KnotIntervalPropagation {
     size_t begin_imu_index = 0;
     size_t end_imu_index = 0;
     bool valid = false;
-    Eigen::Matrix<double, 15, 15> phi = Eigen::Matrix<double, 15, 15>::Identity();
-    Eigen::Matrix<double, 15, 15> q = Eigen::Matrix<double, 15, 15>::Zero();
-    Eigen::Matrix<double, 15, 15> sqrt_info = Eigen::Matrix<double, 15, 15>::Identity();
+    ErrorStateMatrix phi = ErrorStateMatrix::Identity();
+    ErrorStateMatrix q = ErrorStateMatrix::Zero();
+    ErrorStateMatrix sqrt_info = ErrorStateMatrix::Identity();
 };
 
 using KnotIntervalPropagations = std::vector<KnotIntervalPropagation>;
@@ -51,6 +57,8 @@ void BuildIntervalPropagationCache(
     double sigma_accel_mps2,
     double sigma_bg_std,
     double sigma_ba_std,
+    double sigma_sg_std,
+    double sigma_sa_std,
     double bias_tau_s,
     IntervalPropagationCache& cache);
 

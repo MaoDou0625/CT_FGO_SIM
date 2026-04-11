@@ -14,10 +14,10 @@ namespace ct_fgo_sim {
 namespace {
 
 using Matrix3d = Eigen::Matrix3d;
-using Matrix12d = Eigen::Matrix<double, 12, 12>;
-using Matrix15d = Eigen::Matrix<double, 15, 15>;
-using Matrix15x12d = Eigen::Matrix<double, 15, 12>;
-using Matrix30d = Eigen::Matrix<double, 30, 30>;
+using Matrix18d = Eigen::Matrix<double, kErrorNoiseDim, kErrorNoiseDim>;
+using Matrix21d = ErrorStateMatrix;
+using Matrix21x18d = ErrorStateNoiseMatrix;
+using Matrix42d = Eigen::Matrix<double, 2 * kErrorStateDim, 2 * kErrorStateDim>;
 
 constexpr double kTimeTolerance = 1.0e-6;
 
@@ -39,13 +39,14 @@ Matrix3d SkewSymmetric(const Vector3d& vector) {
     return mat;
 }
 
-Matrix15d BuildF(
+Matrix21d BuildF(
     const Vector3d& nominal_blh,
     const Vector3d& nominal_vel_ned,
     const Eigen::Quaterniond& nominal_q_nb,
+    const Vector3d& nominal_angular_rate_body,
     const Vector3d& nominal_specific_force_body,
     double bias_tau_s) {
-    Matrix15d F = Matrix15d::Zero();
+    Matrix21d F = Matrix21d::Zero();
 
     const Eigen::Vector2d rmrn = MeridianPrimeVerticalRadius(nominal_blh.x());
     const double gravity = Earth::Gravity(nominal_blh);
@@ -94,6 +95,7 @@ Matrix15d BuildF(
     F.block<3, 3>(3, 3) = temp;
     F.block<3, 3>(3, 6) = SkewSymmetric(f_n);
     F.block<3, 3>(3, 12) = cbn;
+    F.block<3, 3>(3, 18) = cbn * nominal_specific_force_body.asDiagonal();
 
     temp.setZero();
     temp(0, 0) = -kWgs84Wie * std::sin(lat) / rmh;
@@ -111,30 +113,37 @@ Matrix15d BuildF(
     F.block<3, 3>(6, 3) = temp;
     F.block<3, 3>(6, 6) = -SkewSymmetric(wie_n + wen_n);
     F.block<3, 3>(6, 9) = -cbn;
+    F.block<3, 3>(6, 15) = -cbn * nominal_angular_rate_body.asDiagonal();
 
     const double tau = std::max(1.0, bias_tau_s);
     F.block<3, 3>(9, 9) = -Matrix3d::Identity() / tau;
     F.block<3, 3>(12, 12) = -Matrix3d::Identity() / tau;
+    F.block<3, 3>(15, 15) = -Matrix3d::Identity() / tau;
+    F.block<3, 3>(18, 18) = -Matrix3d::Identity() / tau;
     return F;
 }
 
-Matrix15x12d BuildG(const Eigen::Quaterniond& nominal_q_nb) {
-    Matrix15x12d G = Matrix15x12d::Zero();
+Matrix21x18d BuildG(const Eigen::Quaterniond& nominal_q_nb) {
+    Matrix21x18d G = Matrix21x18d::Zero();
     const Matrix3d cbn = nominal_q_nb.toRotationMatrix();
     G.block<3, 3>(3, 0) = cbn;
     G.block<3, 3>(6, 3) = cbn;
     G.block<3, 3>(9, 6) = Matrix3d::Identity();
     G.block<3, 3>(12, 9) = Matrix3d::Identity();
+    G.block<3, 3>(15, 12) = Matrix3d::Identity();
+    G.block<3, 3>(18, 15) = Matrix3d::Identity();
     return G;
 }
 
-Matrix12d BuildQc(
+Matrix18d BuildQc(
     double sigma_gyro_rps,
     double sigma_accel_mps2,
     double sigma_bg_std,
     double sigma_ba_std,
+    double sigma_sg_std,
+    double sigma_sa_std,
     double bias_tau_s) {
-    Matrix12d Qc = Matrix12d::Zero();
+    Matrix18d Qc = Matrix18d::Zero();
     Qc.block<3, 3>(0, 0) =
         Eigen::Vector3d::Constant(sigma_accel_mps2 * sigma_accel_mps2).asDiagonal();
     Qc.block<3, 3>(3, 3) =
@@ -144,35 +153,39 @@ Matrix12d BuildQc(
         Eigen::Vector3d::Constant(2.0 * sigma_bg_std * sigma_bg_std / tau).asDiagonal();
     Qc.block<3, 3>(9, 9) =
         Eigen::Vector3d::Constant(2.0 * sigma_ba_std * sigma_ba_std / tau).asDiagonal();
+    Qc.block<3, 3>(12, 12) =
+        Eigen::Vector3d::Constant(2.0 * sigma_sg_std * sigma_sg_std / tau).asDiagonal();
+    Qc.block<3, 3>(15, 15) =
+        Eigen::Vector3d::Constant(2.0 * sigma_sa_std * sigma_sa_std / tau).asDiagonal();
     return Qc;
 }
 
 void DiscretizeLinearSystem(
-    const Matrix15d& F,
-    const Matrix15x12d& G,
-    const Matrix12d& Qc,
+    const Matrix21d& F,
+    const Matrix21x18d& G,
+    const Matrix18d& Qc,
     double dt,
-    Matrix15d& phi,
-    Matrix15d& q) {
-    const Matrix15d gcgt = G * Qc * G.transpose();
+    Matrix21d& phi,
+    Matrix21d& q) {
+    const Matrix21d gcgt = G * Qc * G.transpose();
 
-    Matrix30d van_loan = Matrix30d::Zero();
-    van_loan.block<15, 15>(0, 0) = F;
-    van_loan.block<15, 15>(0, 15) = gcgt;
-    van_loan.block<15, 15>(15, 15) = -F.transpose();
+    Matrix42d van_loan = Matrix42d::Zero();
+    van_loan.block<kErrorStateDim, kErrorStateDim>(0, 0) = F;
+    van_loan.block<kErrorStateDim, kErrorStateDim>(0, kErrorStateDim) = gcgt;
+    van_loan.block<kErrorStateDim, kErrorStateDim>(kErrorStateDim, kErrorStateDim) = -F.transpose();
 
-    const Matrix30d expm = (van_loan * dt).exp();
-    phi = expm.block<15, 15>(0, 0);
-    q = expm.block<15, 15>(0, 15) * phi.transpose();
+    const Matrix42d expm = (van_loan * dt).exp();
+    phi = expm.block<kErrorStateDim, kErrorStateDim>(0, 0);
+    q = expm.block<kErrorStateDim, kErrorStateDim>(0, kErrorStateDim) * phi.transpose();
     q = (q + q.transpose()) * 0.5;
 }
 
-Matrix15d BuildSqrtInfo(const Matrix15d& q) {
-    Matrix15d q_stable = q;
+Matrix21d BuildSqrtInfo(const Matrix21d& q) {
+    Matrix21d q_stable = q;
     q_stable.diagonal().array() += 1.0e-12;
-    const Matrix15d info = q_stable.inverse();
-    Eigen::LLT<Matrix15d> llt(info);
-    Matrix15d sqrt_info = Matrix15d::Identity();
+    const Matrix21d info = q_stable.inverse();
+    Eigen::LLT<Matrix21d> llt(info);
+    Matrix21d sqrt_info = Matrix21d::Identity();
     if (llt.info() == Eigen::Success) {
         sqrt_info = llt.matrixL().transpose();
     } else {
@@ -235,6 +248,8 @@ void BuildIntervalPropagationCache(
     double sigma_accel_mps2,
     double sigma_bg_std,
     double sigma_ba_std,
+    double sigma_sg_std,
+    double sigma_sa_std,
     double bias_tau_s,
     IntervalPropagationCache& cache) {
     cache.imu_intervals.clear();
@@ -243,11 +258,13 @@ void BuildIntervalPropagationCache(
         return;
     }
 
-    const Matrix12d Qc = BuildQc(
+    const Matrix18d Qc = BuildQc(
         sigma_gyro_rps,
         sigma_accel_mps2,
         sigma_bg_std,
         sigma_ba_std,
+        sigma_sg_std,
+        sigma_sa_std,
         bias_tau_s);
     cache.imu_intervals.reserve(imu.size() - 1);
     for (size_t i = 1; i < imu.size() && i < nominal_states.size(); ++i) {
@@ -274,8 +291,10 @@ void BuildIntervalPropagationCache(
         const NominalNavState& mid_state = *mid_state_opt;
         const Vector3d bg_mid = mid_state.bg;
         const Vector3d ba_mid = mid_state.ba;
-        interval.omega_ib_b_nom = (meas.dtheta - bg_mid * meas.dt) / meas.dt;
-        const Vector3d specific_force_b_nom = (meas.dvel - ba_mid * meas.dt) / meas.dt;
+        interval.omega_ib_b_nom =
+            meas.dtheta.cwiseQuotient(Vector3d::Ones() + mid_state.sg) / meas.dt - bg_mid;
+        const Vector3d specific_force_b_nom =
+            meas.dvel.cwiseQuotient(Vector3d::Ones() + mid_state.sa) / meas.dt - ba_mid;
 
         const Vector3d omega_ie_n = Earth::Iewn(mid_state.blh.x());
         const Vector3d omega_en_n = Earth::Wnen(mid_state.blh, mid_state.vel_ned);
@@ -299,8 +318,8 @@ void BuildIntervalPropagationCache(
         knot_interval.end_time = control_points[i + 1].Timestamp();
         knot_interval.begin_imu_index = imu_cursor;
 
-        Matrix15d phi_total = Matrix15d::Identity();
-        Matrix15d q_total = Matrix15d::Zero();
+        Matrix21d phi_total = Matrix21d::Identity();
+        Matrix21d q_total = Matrix21d::Zero();
         bool has_step = false;
 
         while (imu_cursor < cache.imu_intervals.size() &&
@@ -332,17 +351,20 @@ void BuildIntervalPropagationCache(
             }
 
             const NominalNavState& mid_state = *mid_state_opt;
+            const Vector3d angular_rate_b_nom =
+                meas.dtheta.cwiseQuotient(Vector3d::Ones() + mid_state.sg) / meas.dt - mid_state.bg;
             const Vector3d specific_force_b_nom =
-                (meas.dvel - mid_state.ba * meas.dt) / meas.dt;
-            const Matrix15d F = BuildF(
+                meas.dvel.cwiseQuotient(Vector3d::Ones() + mid_state.sa) / meas.dt - mid_state.ba;
+            const Matrix21d F = BuildF(
                 mid_state.blh,
                 mid_state.vel_ned,
                 mid_state.q_nb,
+                angular_rate_b_nom,
                 specific_force_b_nom,
                 bias_tau_s);
-            const Matrix15x12d G = BuildG(mid_state.q_nb);
-            Matrix15d phi_step = Matrix15d::Identity();
-            Matrix15d q_step = Matrix15d::Zero();
+            const Matrix21x18d G = BuildG(mid_state.q_nb);
+            Matrix21d phi_step = Matrix21d::Identity();
+            Matrix21d q_step = Matrix21d::Zero();
             DiscretizeLinearSystem(F, G, Qc, meas.dt, phi_step, q_step);
 
             phi_total = phi_step * phi_total;
