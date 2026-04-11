@@ -63,6 +63,14 @@ struct AppConfig {
     int imu_stride = 10;
     int outer_iterations = 1;
     int solver_max_iterations = 20;
+    bool enable_sliding_window_feedback = false;
+    double sliding_window_s = 20.0;
+    double sliding_window_step_s = 5.0;
+    int sliding_window_max_windows = 0;
+    int sliding_window_solver_max_iterations = 5;
+    bool enable_error_state_bridge = false;
+    int error_state_bridge_gnss_stride = 1;
+    double error_state_bridge_weight = 0.2;
     bool use_gnss_factors = true;
     bool use_imu_factors = true;
     bool use_explicit_init_state = false;
@@ -127,7 +135,11 @@ private:
     void TrimMeasurementsToTimeWindow();
     bool InitializeControlPoints();
     bool ResetControlPointsFromNominalTrajectory(bool reset_biases);
-    bool BuildAndSolveProblem();
+    bool RunSlidingWindowFeedback();
+    bool BuildAndSolveProblem(
+        std::optional<double> factor_start_time = std::nullopt,
+        std::optional<double> factor_end_time = std::nullopt,
+        std::optional<int> solver_max_iterations = std::nullopt);
     bool SaveOutputs() const;
     bool ApplyInitialYawFeedbackFromGnss();
     bool ReestimateInitialBiasesFromStaticWindow();

@@ -302,6 +302,15 @@ void BuildIntervalPropagationCache(
         interval.accel_n_mid =
             mid_state.q_nb.toRotationMatrix() * specific_force_b_nom +
             gravity_n - (2.0 * omega_ie_n + omega_en_n).cross(mid_state.vel_ned);
+        const Matrix21d F = BuildF(
+            mid_state.blh,
+            mid_state.vel_ned,
+            mid_state.q_nb,
+            interval.omega_ib_b_nom,
+            specific_force_b_nom,
+            bias_tau_s);
+        const Matrix21x18d G = BuildG(mid_state.q_nb);
+        DiscretizeLinearSystem(F, G, Qc, meas.dt, interval.phi, interval.q);
 
         cache.imu_intervals.push_back(std::move(interval));
     }
@@ -338,37 +347,8 @@ void BuildIntervalPropagationCache(
                 break;
             }
 
-            const size_t imu_index = imu_interval.imu_index;
-            const ImuMeasurement& meas = imu[imu_index];
-            const NominalNavState& start_state = nominal_states[imu_index - 1];
-            const NominalNavState& end_state = nominal_states[imu_index];
-            const auto mid_state_opt = InterpolateNominalStateMid(
-                start_state,
-                end_state,
-                imu_interval.mid_time);
-            if (!mid_state_opt) {
-                break;
-            }
-
-            const NominalNavState& mid_state = *mid_state_opt;
-            const Vector3d angular_rate_b_nom =
-                meas.dtheta.cwiseQuotient(Vector3d::Ones() + mid_state.sg) / meas.dt - mid_state.bg;
-            const Vector3d specific_force_b_nom =
-                meas.dvel.cwiseQuotient(Vector3d::Ones() + mid_state.sa) / meas.dt - mid_state.ba;
-            const Matrix21d F = BuildF(
-                mid_state.blh,
-                mid_state.vel_ned,
-                mid_state.q_nb,
-                angular_rate_b_nom,
-                specific_force_b_nom,
-                bias_tau_s);
-            const Matrix21x18d G = BuildG(mid_state.q_nb);
-            Matrix21d phi_step = Matrix21d::Identity();
-            Matrix21d q_step = Matrix21d::Zero();
-            DiscretizeLinearSystem(F, G, Qc, meas.dt, phi_step, q_step);
-
-            phi_total = phi_step * phi_total;
-            q_total = phi_step * q_total * phi_step.transpose() + q_step;
+            phi_total = imu_interval.phi * phi_total;
+            q_total = imu_interval.phi * q_total * imu_interval.phi.transpose() + imu_interval.q;
             has_step = true;
             ++local_cursor;
 
@@ -389,6 +369,58 @@ void BuildIntervalPropagationCache(
         }
         cache.knot_intervals[i] = std::move(knot_interval);
     }
+}
+
+std::optional<KnotIntervalPropagation> BuildErrorStatePropagationBetweenTimes(
+    const IntervalPropagationCache& cache,
+    double start_time,
+    double end_time) {
+    if (end_time <= start_time + kTimeTolerance || cache.imu_intervals.empty()) {
+        return std::nullopt;
+    }
+
+    auto first = std::lower_bound(
+        cache.imu_intervals.begin(),
+        cache.imu_intervals.end(),
+        start_time,
+        [](const NominalImuInterval& interval, double time) {
+            return interval.end_time <= time + kTimeTolerance;
+        });
+    if (first == cache.imu_intervals.end()) {
+        return std::nullopt;
+    }
+
+    KnotIntervalPropagation propagation;
+    propagation.start_time = start_time;
+    propagation.end_time = end_time;
+    propagation.begin_imu_index = first->imu_index;
+    Matrix21d phi_total = Matrix21d::Identity();
+    Matrix21d q_total = Matrix21d::Zero();
+    bool has_step = false;
+    size_t last_imu_index = first->imu_index;
+
+    for (auto it = first; it != cache.imu_intervals.end(); ++it) {
+        if (it->start_time < start_time - kTimeTolerance) {
+            continue;
+        }
+        if (it->end_time > end_time + kTimeTolerance) {
+            break;
+        }
+        phi_total = it->phi * phi_total;
+        q_total = it->phi * q_total * it->phi.transpose() + it->q;
+        has_step = true;
+        last_imu_index = it->imu_index;
+    }
+
+    if (!has_step) {
+        return std::nullopt;
+    }
+    propagation.end_imu_index = last_imu_index;
+    propagation.valid = true;
+    propagation.phi = phi_total;
+    propagation.q = (q_total + q_total.transpose()) * 0.5;
+    propagation.sqrt_info = BuildSqrtInfo(propagation.q);
+    return propagation;
 }
 
 std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(

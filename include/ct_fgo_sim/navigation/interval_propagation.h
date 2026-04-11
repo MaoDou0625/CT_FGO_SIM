@@ -25,6 +25,8 @@ struct NominalImuInterval {
     size_t imu_index = 0;
     Vector3d omega_ib_b_nom = Vector3d::Zero();
     Vector3d accel_n_mid = Vector3d::Zero();
+    ErrorStateMatrix phi = ErrorStateMatrix::Identity();
+    ErrorStateMatrix q = ErrorStateMatrix::Zero();
 };
 
 using NominalImuIntervals = std::vector<NominalImuInterval>;
@@ -61,6 +63,11 @@ void BuildIntervalPropagationCache(
     double sigma_sa_std,
     double bias_tau_s,
     IntervalPropagationCache& cache);
+
+std::optional<KnotIntervalPropagation> BuildErrorStatePropagationBetweenTimes(
+    const IntervalPropagationCache& cache,
+    double start_time,
+    double end_time);
 
 std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(
     const IntervalPropagationCache& cache,
