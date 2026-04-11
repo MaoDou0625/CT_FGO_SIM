@@ -418,22 +418,16 @@ bool PropagateNominalTrajectoryForward(
         return true;
     }
 
-    auto anchor_it = std::lower_bound(
+    auto anchor_it = std::upper_bound(
         states.begin(),
         states.end(),
         start_time,
-        [](const NominalNavState& state, double time) { return state.time < time; });
-    if (anchor_it == states.end()) {
+        [](double time, const NominalNavState& state) { return time < state.time; });
+    if (anchor_it == states.begin()) {
         return false;
     }
-    size_t anchor_index = static_cast<size_t>(std::distance(states.begin(), anchor_it));
-    if (anchor_index == 0) {
-        anchor_index = 1;
-    }
-    while (anchor_index + 1 < states.size() && states[anchor_index].time < start_time) {
-        ++anchor_index;
-    }
-    if (anchor_index >= states.size()) {
+    size_t anchor_index = static_cast<size_t>(std::distance(states.begin(), anchor_it)) - 1;
+    if (anchor_index + 1 >= states.size()) {
         return false;
     }
 
