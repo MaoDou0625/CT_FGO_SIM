@@ -69,9 +69,6 @@ struct AppConfig {
     double sliding_window_mature_s = 0.0;
     int sliding_window_max_windows = 0;
     int sliding_window_solver_max_iterations = 5;
-    bool enable_error_state_bridge = false;
-    int error_state_bridge_gnss_stride = 1;
-    double error_state_bridge_weight = 0.2;
     bool use_gnss_factors = true;
     bool use_imu_factors = true;
     bool use_explicit_init_state = false;

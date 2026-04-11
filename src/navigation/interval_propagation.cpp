@@ -371,58 +371,6 @@ void BuildIntervalPropagationCache(
     }
 }
 
-std::optional<KnotIntervalPropagation> BuildErrorStatePropagationBetweenTimes(
-    const IntervalPropagationCache& cache,
-    double start_time,
-    double end_time) {
-    if (end_time <= start_time + kTimeTolerance || cache.imu_intervals.empty()) {
-        return std::nullopt;
-    }
-
-    auto first = std::lower_bound(
-        cache.imu_intervals.begin(),
-        cache.imu_intervals.end(),
-        start_time,
-        [](const NominalImuInterval& interval, double time) {
-            return interval.end_time <= time + kTimeTolerance;
-        });
-    if (first == cache.imu_intervals.end()) {
-        return std::nullopt;
-    }
-
-    KnotIntervalPropagation propagation;
-    propagation.start_time = start_time;
-    propagation.end_time = end_time;
-    propagation.begin_imu_index = first->imu_index;
-    Matrix21d phi_total = Matrix21d::Identity();
-    Matrix21d q_total = Matrix21d::Zero();
-    bool has_step = false;
-    size_t last_imu_index = first->imu_index;
-
-    for (auto it = first; it != cache.imu_intervals.end(); ++it) {
-        if (it->start_time < start_time - kTimeTolerance) {
-            continue;
-        }
-        if (it->end_time > end_time + kTimeTolerance) {
-            break;
-        }
-        phi_total = it->phi * phi_total;
-        q_total = it->phi * q_total * it->phi.transpose() + it->q;
-        has_step = true;
-        last_imu_index = it->imu_index;
-    }
-
-    if (!has_step) {
-        return std::nullopt;
-    }
-    propagation.end_imu_index = last_imu_index;
-    propagation.valid = true;
-    propagation.phi = phi_total;
-    propagation.q = (q_total + q_total.transpose()) * 0.5;
-    propagation.sqrt_info = BuildSqrtInfo(propagation.q);
-    return propagation;
-}
-
 std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(
     const IntervalPropagationCache& cache,
     double time) {

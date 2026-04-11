@@ -29,6 +29,44 @@ def heading_degrees_0_360(angle_deg: np.ndarray) -> np.ndarray:
     return out
 
 
+def continuous_heading_degrees(angle_deg: np.ndarray) -> np.ndarray:
+    angle_deg = np.asarray(angle_deg, dtype=float)
+    out = np.full_like(angle_deg, np.nan, dtype=float)
+    finite = np.isfinite(angle_deg)
+    start = 0
+    while start < angle_deg.size:
+        while start < angle_deg.size and not finite[start]:
+            start += 1
+        end = start
+        while end < angle_deg.size and finite[end]:
+            end += 1
+        if end > start:
+            out[start:end] = np.degrees(np.unwrap(np.radians(angle_deg[start:end])))
+        start = end
+    return out
+
+
+def align_heading_branch(
+    reference_time: np.ndarray,
+    reference_yaw_deg: np.ndarray,
+    time_s: np.ndarray,
+    yaw_deg: np.ndarray,
+) -> np.ndarray:
+    yaw_deg = continuous_heading_degrees(yaw_deg)
+    finite = np.isfinite(yaw_deg)
+    if not np.any(finite):
+        return yaw_deg
+
+    ref_finite = np.isfinite(reference_yaw_deg)
+    if not np.any(ref_finite):
+        return yaw_deg
+
+    sample_idx = np.flatnonzero(finite)[0]
+    ref = np.interp(time_s[sample_idx], reference_time[ref_finite], reference_yaw_deg[ref_finite])
+    offset = 360.0 * np.round((ref - yaw_deg[sample_idx]) / 360.0)
+    return yaw_deg + offset
+
+
 def quat_to_euler_enu_xyzw(
     qx: np.ndarray,
     qy: np.ndarray,
@@ -267,7 +305,7 @@ def save_matlab_fig(
                 hold on;
                 plot(kf(:,1), kf(:,idx+1), 'LineWidth', 1.0, 'DisplayName', '{kf_label}');
                 if has_rtk && idx == 3
-                    plot(rtk(:,1), rtk(:,2), 'LineWidth', 1.0, 'DisplayName', '{rtk_label or "RTK heading"}');
+                    plot(rtk(:,1), rtk(:,2), '.', 'MarkerSize', 4, 'DisplayName', '{rtk_label or "RTK heading"}');
                 end
                 grid on;
                 ylabel(labels{{idx}});
@@ -318,7 +356,7 @@ def plot_and_save(
         ax.legend(loc="best")
 
     if rtk_time is not None and rtk_yaw is not None:
-        axes[2].plot(rtk_time, rtk_yaw, linewidth=1.0, label=rtk_label)
+        axes[2].plot(rtk_time, rtk_yaw, linestyle="None", marker=".", markersize=2.0, label=rtk_label)
         axes[2].legend(loc="best")
 
     axes[-1].set_xlabel("Time (s)")
@@ -374,6 +412,12 @@ def main() -> None:
             common_start, common_end)
     require_nonempty(ct_time, "CT attitude", common_start, common_end)
     require_nonempty(kf_time, "KF attitude", common_start, common_end)
+    ct_roll = continuous_heading_degrees(ct_roll)
+    kf_roll = align_heading_branch(ct_time, ct_roll, kf_time, kf_roll)
+    ct_yaw = continuous_heading_degrees(ct_yaw)
+    kf_yaw = align_heading_branch(ct_time, ct_yaw, kf_time, kf_yaw)
+    if rtk_yaw is not None and rtk_time is not None:
+        rtk_yaw = align_heading_branch(ct_time, ct_yaw, rtk_time, rtk_yaw)
 
     output_dir = args.output_dir or args.ct_nav.parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -413,6 +457,12 @@ def main() -> None:
                 full_common_start, full_common_end)
         require_nonempty(full_time, "CT full attitude", full_common_start, full_common_end)
         require_nonempty(full_kf_time, "KF attitude", full_common_start, full_common_end)
+        full_roll = continuous_heading_degrees(full_roll)
+        full_kf_roll = align_heading_branch(full_time, full_roll, full_kf_time, full_kf_roll)
+        full_yaw = continuous_heading_degrees(full_yaw)
+        full_kf_yaw = align_heading_branch(full_time, full_yaw, full_kf_time, full_kf_yaw)
+        if full_rtk_yaw is not None and full_rtk_time is not None:
+            full_rtk_yaw = align_heading_branch(full_time, full_yaw, full_rtk_time, full_rtk_yaw)
 
         full_png_path = output_dir / "attitude_compare_full.png"
         full_fig_path = output_dir / "attitude_compare_full.fig"

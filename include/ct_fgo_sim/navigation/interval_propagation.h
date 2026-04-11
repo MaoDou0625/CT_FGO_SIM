@@ -64,11 +64,6 @@ void BuildIntervalPropagationCache(
     double bias_tau_s,
     IntervalPropagationCache& cache);
 
-std::optional<KnotIntervalPropagation> BuildErrorStatePropagationBetweenTimes(
-    const IntervalPropagationCache& cache,
-    double start_time,
-    double end_time);
-
 std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(
     const IntervalPropagationCache& cache,
     double time);

@@ -29,6 +29,41 @@ def heading_degrees_0_360(angle_deg: np.ndarray) -> np.ndarray:
     return out
 
 
+def continuous_heading_degrees(angle_deg: np.ndarray) -> np.ndarray:
+    angle_deg = np.asarray(angle_deg, dtype=float)
+    out = np.full_like(angle_deg, np.nan, dtype=float)
+    finite = np.isfinite(angle_deg)
+    start = 0
+    while start < angle_deg.size:
+        while start < angle_deg.size and not finite[start]:
+            start += 1
+        end = start
+        while end < angle_deg.size and finite[end]:
+            end += 1
+        if end > start:
+            out[start:end] = np.degrees(np.unwrap(np.radians(angle_deg[start:end])))
+        start = end
+    return out
+
+
+def align_heading_branch(
+    reference_time: np.ndarray,
+    reference_yaw_deg: np.ndarray,
+    time_s: np.ndarray,
+    yaw_deg: np.ndarray,
+) -> np.ndarray:
+    yaw_deg = continuous_heading_degrees(yaw_deg)
+    finite = np.isfinite(yaw_deg)
+    ref_finite = np.isfinite(reference_yaw_deg)
+    if not np.any(finite) or not np.any(ref_finite):
+        return yaw_deg
+
+    sample_idx = np.flatnonzero(finite)[0]
+    ref = np.interp(time_s[sample_idx], reference_time[ref_finite], reference_yaw_deg[ref_finite])
+    offset = 360.0 * np.round((ref - yaw_deg[sample_idx]) / 360.0)
+    return yaw_deg + offset
+
+
 def quat_to_euler_enu_xyzw(
     qx: np.ndarray,
     qy: np.ndarray,
@@ -269,8 +304,12 @@ def main() -> None:
     att_start, att_end = intersect_window(ct_pose_time, kf_time)
     ct_att_time, ct_att = trim_series(ct_pose_time, ct_att, att_start, att_end)
     kf_att_time, kf_att = trim_series(kf_time, kf_att, att_start, att_end)
+    ct_att[:, 0] = continuous_heading_degrees(ct_att[:, 0])
+    kf_att[:, 0] = align_heading_branch(ct_att_time, ct_att[:, 0], kf_att_time, kf_att[:, 0])
+    ct_att[:, 2] = continuous_heading_degrees(ct_att[:, 2])
+    kf_att[:, 2] = align_heading_branch(ct_att_time, ct_att[:, 2], kf_att_time, kf_att[:, 2])
     plot_compare(
-        "Attitude Comparison (shared time window, NED)",
+        "Attitude Comparison (shared time window, NED, continuous yaw)",
         ["Roll (deg)", "Pitch (deg)", "Yaw (deg)"],
         args.output_dir / "attitude_compare_full",
         [(ct_att_time, ct_att, "CT full"), (kf_att_time, kf_att, "KF-GINS")],

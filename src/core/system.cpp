@@ -1,6 +1,5 @@
 #include "ct_fgo_sim/core/system.h"
 
-#include "ct_fgo_sim/factors/error_state_bridge_factor.h"
 #include "ct_fgo_sim/factors/error_state_gnss_factor.h"
 #include "ct_fgo_sim/factors/error_state_interval_factor.h"
 #include "ct_fgo_sim/factors/quaternion_prior_factor.h"
@@ -460,18 +459,6 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
             config_.sliding_window_solver_max_iterations = std::max(1, sliding["solver_max_iterations"].as<int>());
         }
     }
-    if (cfg["error_state_bridge"]) {
-        const YAML::Node bridge = cfg["error_state_bridge"];
-        if (bridge["enable"]) {
-            config_.enable_error_state_bridge = bridge["enable"].as<bool>();
-        }
-        if (bridge["gnss_stride"]) {
-            config_.error_state_bridge_gnss_stride = std::max(1, bridge["gnss_stride"].as<int>());
-        }
-        if (bridge["weight"]) {
-            config_.error_state_bridge_weight = std::max(0.0, bridge["weight"].as<double>());
-        }
-    }
     if (cfg["use_gnss_factors"]) {
         config_.use_gnss_factors = cfg["use_gnss_factors"].as<bool>();
     }
@@ -681,9 +668,6 @@ void System::Describe() const {
               << " s, step=" << config_.sliding_window_step_s
               << " s, mature=" << config_.sliding_window_mature_s
               << " s, max_windows=" << config_.sliding_window_max_windows;
-    LOG(INFO) << "Error-state bridge factors: " << (config_.enable_error_state_bridge ? "true" : "false")
-              << ", GNSS stride=" << config_.error_state_bridge_gnss_stride
-              << ", weight=" << config_.error_state_bridge_weight;
     LOG(INFO) << "Enable initial yaw feedback: " << (config_.enable_initial_yaw_feedback ? "true" : "false");
     LOG(INFO) << "Use GNSS factors: " << (config_.use_gnss_factors ? "true" : "false");
     LOG(INFO) << "Use IMU factors: " << (config_.use_imu_factors ? "true" : "false");
@@ -1030,74 +1014,6 @@ bool System::BuildAndSolveProblem(
         }
     }
 
-    int bridge_factor_count = 0;
-    if (config_.enable_error_state_bridge && config_.use_imu_factors && gnss_.size() >= 2) {
-        const int stride = std::max(1, config_.error_state_bridge_gnss_stride);
-        for (size_t i = static_cast<size_t>(stride); i < gnss_.size(); i += static_cast<size_t>(stride)) {
-            const size_t j = i - static_cast<size_t>(stride);
-            const double t0 = gnss_[j].time;
-            const double t1 = gnss_[i].time;
-            if (!factor_in_window(0.5 * (t0 + t1))) {
-                continue;
-            }
-            const int i0 = FindNodeIntervalStart(control_points_, t0);
-            const int j0 = FindNodeIntervalStart(control_points_, t1);
-            if (i0 < 0 || j0 < 0 ||
-                i0 + 1 >= static_cast<int>(control_points_.size()) ||
-                j0 + 1 >= static_cast<int>(control_points_.size())) {
-                continue;
-            }
-            if (i0 == j0 || i0 + 1 == j0 || j0 + 1 == i0) {
-                continue;
-            }
-            const auto bridge = BuildErrorStatePropagationBetweenTimes(interval_cache_, t0, t1);
-            if (!bridge || !bridge->valid) {
-                continue;
-            }
-            const double dt_i = control_points_[i0 + 1].Timestamp() - control_points_[i0].Timestamp();
-            const double dt_j = control_points_[j0 + 1].Timestamp() - control_points_[j0].Timestamp();
-            if (dt_i <= 1.0e-9 || dt_j <= 1.0e-9) {
-                continue;
-            }
-            const double u_i = std::clamp((t0 - control_points_[i0].Timestamp()) / dt_i, 0.0, 1.0);
-            const double u_j = std::clamp((t1 - control_points_[j0].Timestamp()) / dt_j, 0.0, 1.0);
-            const ErrorStateMatrix bridge_sqrt_info =
-                config_.error_state_bridge_weight * bridge->sqrt_info;
-            problem.AddResidualBlock(
-                factors::ErrorStateBridgeFactor::Create(u_i, u_j, bridge->phi, bridge_sqrt_info),
-                nullptr,
-                delta_theta_nodes_[i0].data(),
-                delta_vel_nodes_[i0].data(),
-                delta_pos_nodes_[i0].data(),
-                delta_bg_nodes_[i0].data(),
-                delta_ba_nodes_[i0].data(),
-                delta_sg_nodes_[i0].data(),
-                delta_sa_nodes_[i0].data(),
-                delta_theta_nodes_[i0 + 1].data(),
-                delta_vel_nodes_[i0 + 1].data(),
-                delta_pos_nodes_[i0 + 1].data(),
-                delta_bg_nodes_[i0 + 1].data(),
-                delta_ba_nodes_[i0 + 1].data(),
-                delta_sg_nodes_[i0 + 1].data(),
-                delta_sa_nodes_[i0 + 1].data(),
-                delta_theta_nodes_[j0].data(),
-                delta_vel_nodes_[j0].data(),
-                delta_pos_nodes_[j0].data(),
-                delta_bg_nodes_[j0].data(),
-                delta_ba_nodes_[j0].data(),
-                delta_sg_nodes_[j0].data(),
-                delta_sa_nodes_[j0].data(),
-                delta_theta_nodes_[j0 + 1].data(),
-                delta_vel_nodes_[j0 + 1].data(),
-                delta_pos_nodes_[j0 + 1].data(),
-                delta_bg_nodes_[j0 + 1].data(),
-                delta_ba_nodes_[j0 + 1].data(),
-                delta_sg_nodes_[j0 + 1].data(),
-                delta_sa_nodes_[j0 + 1].data());
-            ++bridge_factor_count;
-        }
-    }
-
     ceres::Solver::Options options;
     options.max_num_iterations = solver_max_iterations.value_or(config_.solver_max_iterations);
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
@@ -1110,7 +1026,6 @@ bool System::BuildAndSolveProblem(
 
     LOG(INFO) << "GNSS factors: " << gnss_factor_count;
     LOG(INFO) << "Interval propagation factors: " << process_factor_count;
-    LOG(INFO) << "Error-state bridge factors: " << bridge_factor_count;
     LOG(INFO) << summary.BriefReport();
     return summary.termination_type != ceres::FAILURE;
 }
@@ -1803,9 +1718,6 @@ bool System::SaveOutputs() const {
     summary_ofs << "sliding_window_mature_s: " << config_.sliding_window_mature_s << '\n';
     summary_ofs << "sliding_window_max_windows: " << config_.sliding_window_max_windows << '\n';
     summary_ofs << "sliding_window_solver_max_iterations: " << config_.sliding_window_solver_max_iterations << '\n';
-    summary_ofs << "enable_error_state_bridge: " << config_.enable_error_state_bridge << '\n';
-    summary_ofs << "error_state_bridge_gnss_stride: " << config_.error_state_bridge_gnss_stride << '\n';
-    summary_ofs << "error_state_bridge_weight: " << config_.error_state_bridge_weight << '\n';
     summary_ofs << "enable_initial_yaw_feedback: " << config_.enable_initial_yaw_feedback << '\n';
     summary_ofs << "initial_yaw_feedback_applied: " << initial_yaw_feedback_applied_ << '\n';
     summary_ofs << "initial_yaw_feedback_total_rad: " << initial_yaw_feedback_total_rad_ << '\n';
