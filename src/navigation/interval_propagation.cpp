@@ -214,6 +214,62 @@ std::optional<NominalNavState> InterpolateNominalStateMid(
     return out;
 }
 
+std::optional<NominalImuInterval> BuildNominalImuInterval(
+    const ImuMeasurementArray& imu,
+    const NominalNavStates& nominal_states,
+    size_t imu_index,
+    const Matrix18d& qc,
+    double bias_tau_s) {
+    if (imu_index == 0 || imu_index >= imu.size() || imu_index >= nominal_states.size()) {
+        return std::nullopt;
+    }
+
+    const ImuMeasurement& meas = imu[imu_index];
+    if (meas.dt <= 1.0e-9) {
+        return std::nullopt;
+    }
+
+    const NominalNavState& start_state = nominal_states[imu_index - 1];
+    const NominalNavState& end_state = nominal_states[imu_index];
+    const double mid_time = 0.5 * (start_state.time + end_state.time);
+    const auto mid_state_opt = InterpolateNominalStateMid(start_state, end_state, mid_time);
+    if (!mid_state_opt) {
+        return std::nullopt;
+    }
+
+    NominalImuInterval interval;
+    interval.start_time = start_state.time;
+    interval.end_time = end_state.time;
+    interval.mid_time = mid_time;
+    interval.dt = meas.dt;
+    interval.imu_index = imu_index;
+
+    const NominalNavState& mid_state = *mid_state_opt;
+    const Vector3d bg_mid = mid_state.bg;
+    const Vector3d ba_mid = mid_state.ba;
+    interval.omega_ib_b_nom =
+        meas.dtheta.cwiseQuotient(Vector3d::Ones() + mid_state.sg) / meas.dt - bg_mid;
+    const Vector3d specific_force_b_nom =
+        meas.dvel.cwiseQuotient(Vector3d::Ones() + mid_state.sa) / meas.dt - ba_mid;
+
+    const Vector3d omega_ie_n = Earth::Iewn(mid_state.blh.x());
+    const Vector3d omega_en_n = Earth::Wnen(mid_state.blh, mid_state.vel_ned);
+    const Vector3d gravity_n(0.0, 0.0, Earth::Gravity(mid_state.blh));
+    interval.accel_n_mid =
+        mid_state.q_nb.toRotationMatrix() * specific_force_b_nom +
+        gravity_n - (2.0 * omega_ie_n + omega_en_n).cross(mid_state.vel_ned);
+    const Matrix21d F = BuildF(
+        mid_state.blh,
+        mid_state.vel_ned,
+        mid_state.q_nb,
+        interval.omega_ib_b_nom,
+        specific_force_b_nom,
+        bias_tau_s);
+    const Matrix21x18d G = BuildG(mid_state.q_nb);
+    DiscretizeLinearSystem(F, G, qc, meas.dt, interval.phi, interval.q);
+    return interval;
+}
+
 std::optional<size_t> FindImuIntervalIndex(
     const NominalImuIntervals& intervals,
     double time) {
@@ -236,6 +292,67 @@ std::optional<size_t> FindImuIntervalIndex(
         return std::nullopt;
     }
     return static_cast<size_t>(std::distance(intervals.begin(), upper));
+}
+
+KnotIntervalPropagation BuildKnotIntervalPropagationFromCache(
+    const NominalImuIntervals& imu_intervals,
+    const spline::ControlPointArray& control_points,
+    size_t knot_index) {
+    KnotIntervalPropagation knot_interval;
+    if (knot_index + 1 >= control_points.size() || imu_intervals.empty()) {
+        return knot_interval;
+    }
+
+    knot_interval.start_time = control_points[knot_index].Timestamp();
+    knot_interval.end_time = control_points[knot_index + 1].Timestamp();
+
+    auto first = std::lower_bound(
+        imu_intervals.begin(),
+        imu_intervals.end(),
+        knot_interval.start_time,
+        [](const NominalImuInterval& interval, double time) {
+            return interval.end_time <= time + kTimeTolerance;
+        });
+    if (first == imu_intervals.end()) {
+        return knot_interval;
+    }
+
+    knot_interval.begin_imu_index = static_cast<size_t>(std::distance(imu_intervals.begin(), first));
+    Matrix21d phi_total = Matrix21d::Identity();
+    Matrix21d q_total = Matrix21d::Zero();
+    bool has_step = false;
+    size_t local_cursor = knot_interval.begin_imu_index;
+
+    while (local_cursor < imu_intervals.size()) {
+        const NominalImuInterval& imu_interval = imu_intervals[local_cursor];
+        if (imu_interval.start_time < knot_interval.start_time - kTimeTolerance) {
+            knot_interval.valid = false;
+            break;
+        }
+        if (imu_interval.end_time > knot_interval.end_time + kTimeTolerance) {
+            break;
+        }
+
+        phi_total = imu_interval.phi * phi_total;
+        q_total = imu_interval.phi * q_total * imu_interval.phi.transpose() + imu_interval.q;
+        has_step = true;
+        ++local_cursor;
+
+        if (std::abs(imu_interval.end_time - knot_interval.end_time) <= kTimeTolerance) {
+            knot_interval.valid = true;
+            break;
+        }
+    }
+
+    knot_interval.end_imu_index = local_cursor;
+    if (has_step && knot_interval.valid) {
+        knot_interval.phi = phi_total;
+        knot_interval.q = (q_total + q_total.transpose()) * 0.5;
+        knot_interval.sqrt_info = BuildSqrtInfo(knot_interval.q);
+    } else {
+        knot_interval.valid = false;
+    }
+    return knot_interval;
 }
 
 }  // namespace
@@ -268,51 +385,10 @@ void BuildIntervalPropagationCache(
         bias_tau_s);
     cache.imu_intervals.reserve(imu.size() - 1);
     for (size_t i = 1; i < imu.size() && i < nominal_states.size(); ++i) {
-        const ImuMeasurement& meas = imu[i];
-        if (meas.dt <= 1.0e-9) {
-            continue;
+        auto interval = BuildNominalImuInterval(imu, nominal_states, i, Qc, bias_tau_s);
+        if (interval) {
+            cache.imu_intervals.push_back(std::move(*interval));
         }
-
-        const NominalNavState& start_state = nominal_states[i - 1];
-        const NominalNavState& end_state = nominal_states[i];
-        const double mid_time = 0.5 * (start_state.time + end_state.time);
-        const auto mid_state_opt = InterpolateNominalStateMid(start_state, end_state, mid_time);
-        if (!mid_state_opt) {
-            continue;
-        }
-
-        NominalImuInterval interval;
-        interval.start_time = start_state.time;
-        interval.end_time = end_state.time;
-        interval.mid_time = mid_time;
-        interval.dt = meas.dt;
-        interval.imu_index = i;
-
-        const NominalNavState& mid_state = *mid_state_opt;
-        const Vector3d bg_mid = mid_state.bg;
-        const Vector3d ba_mid = mid_state.ba;
-        interval.omega_ib_b_nom =
-            meas.dtheta.cwiseQuotient(Vector3d::Ones() + mid_state.sg) / meas.dt - bg_mid;
-        const Vector3d specific_force_b_nom =
-            meas.dvel.cwiseQuotient(Vector3d::Ones() + mid_state.sa) / meas.dt - ba_mid;
-
-        const Vector3d omega_ie_n = Earth::Iewn(mid_state.blh.x());
-        const Vector3d omega_en_n = Earth::Wnen(mid_state.blh, mid_state.vel_ned);
-        const Vector3d gravity_n(0.0, 0.0, Earth::Gravity(mid_state.blh));
-        interval.accel_n_mid =
-            mid_state.q_nb.toRotationMatrix() * specific_force_b_nom +
-            gravity_n - (2.0 * omega_ie_n + omega_en_n).cross(mid_state.vel_ned);
-        const Matrix21d F = BuildF(
-            mid_state.blh,
-            mid_state.vel_ned,
-            mid_state.q_nb,
-            interval.omega_ib_b_nom,
-            specific_force_b_nom,
-            bias_tau_s);
-        const Matrix21x18d G = BuildG(mid_state.q_nb);
-        DiscretizeLinearSystem(F, G, Qc, meas.dt, interval.phi, interval.q);
-
-        cache.imu_intervals.push_back(std::move(interval));
     }
 
     if (control_points.size() < 2 || cache.imu_intervals.empty()) {
@@ -322,53 +398,88 @@ void BuildIntervalPropagationCache(
     cache.knot_intervals.resize(control_points.size() - 1);
     size_t imu_cursor = 0;
     for (size_t i = 0; i + 1 < control_points.size(); ++i) {
-        KnotIntervalPropagation knot_interval;
-        knot_interval.start_time = control_points[i].Timestamp();
-        knot_interval.end_time = control_points[i + 1].Timestamp();
-        knot_interval.begin_imu_index = imu_cursor;
-
-        Matrix21d phi_total = Matrix21d::Identity();
-        Matrix21d q_total = Matrix21d::Zero();
-        bool has_step = false;
-
         while (imu_cursor < cache.imu_intervals.size() &&
-               cache.imu_intervals[imu_cursor].end_time <= knot_interval.start_time + kTimeTolerance) {
+               cache.imu_intervals[imu_cursor].end_time <= control_points[i].Timestamp() + kTimeTolerance) {
             ++imu_cursor;
         }
-
-        size_t local_cursor = imu_cursor;
-        while (local_cursor < cache.imu_intervals.size()) {
-            const NominalImuInterval& imu_interval = cache.imu_intervals[local_cursor];
-            if (imu_interval.start_time < knot_interval.start_time - kTimeTolerance) {
-                knot_interval.valid = false;
-                break;
-            }
-            if (imu_interval.end_time > knot_interval.end_time + kTimeTolerance) {
-                break;
-            }
-
-            phi_total = imu_interval.phi * phi_total;
-            q_total = imu_interval.phi * q_total * imu_interval.phi.transpose() + imu_interval.q;
-            has_step = true;
-            ++local_cursor;
-
-            if (std::abs(imu_interval.end_time - knot_interval.end_time) <= kTimeTolerance) {
-                knot_interval.valid = true;
-                break;
-            }
-        }
-
-        knot_interval.end_imu_index = local_cursor;
-        if (has_step && knot_interval.valid) {
-            knot_interval.phi = phi_total;
-            knot_interval.q = (q_total + q_total.transpose()) * 0.5;
-            knot_interval.sqrt_info = BuildSqrtInfo(knot_interval.q);
-            imu_cursor = local_cursor;
-        } else {
-            knot_interval.valid = false;
+        KnotIntervalPropagation knot_interval =
+            BuildKnotIntervalPropagationFromCache(cache.imu_intervals, control_points, i);
+        if (knot_interval.valid) {
+            imu_cursor = knot_interval.end_imu_index;
         }
         cache.knot_intervals[i] = std::move(knot_interval);
     }
+}
+
+bool UpdateIntervalPropagationCacheRange(
+    const ImuMeasurementArray& imu,
+    const NominalNavStates& nominal_states,
+    const spline::ControlPointArray& control_points,
+    double sigma_gyro_rps,
+    double sigma_accel_mps2,
+    double sigma_bg_std,
+    double sigma_ba_std,
+    double sigma_sg_std,
+    double sigma_sa_std,
+    double bias_tau_s,
+    double update_start_time,
+    double update_end_time,
+    IntervalPropagationCache& cache) {
+    if (update_end_time < update_start_time) {
+        std::swap(update_start_time, update_end_time);
+    }
+    if (imu.size() < 2 || nominal_states.size() < 2 || control_points.size() < 2 ||
+        cache.imu_intervals.empty() || cache.knot_intervals.size() + 1 != control_points.size()) {
+        BuildIntervalPropagationCache(
+            imu,
+            nominal_states,
+            control_points,
+            sigma_gyro_rps,
+            sigma_accel_mps2,
+            sigma_bg_std,
+            sigma_ba_std,
+            sigma_sg_std,
+            sigma_sa_std,
+            bias_tau_s,
+            cache);
+        return !cache.imu_intervals.empty() && !cache.knot_intervals.empty();
+    }
+
+    const Matrix18d Qc = BuildQc(
+        sigma_gyro_rps,
+        sigma_accel_mps2,
+        sigma_bg_std,
+        sigma_ba_std,
+        sigma_sg_std,
+        sigma_sa_std,
+        bias_tau_s);
+
+    const double start = update_start_time - kTimeTolerance;
+    const double end = update_end_time + kTimeTolerance;
+    bool updated_any_imu = false;
+    for (auto& interval : cache.imu_intervals) {
+        if (interval.end_time < start || interval.start_time > end) {
+            continue;
+        }
+        auto updated = BuildNominalImuInterval(imu, nominal_states, interval.imu_index, Qc, bias_tau_s);
+        if (updated) {
+            interval = std::move(*updated);
+            updated_any_imu = true;
+        }
+    }
+
+    bool updated_any_knot = false;
+    for (size_t i = 0; i + 1 < control_points.size(); ++i) {
+        const double knot_start = control_points[i].Timestamp();
+        const double knot_end = control_points[i + 1].Timestamp();
+        if (knot_end < start || knot_start > end) {
+            continue;
+        }
+        cache.knot_intervals[i] =
+            BuildKnotIntervalPropagationFromCache(cache.imu_intervals, control_points, i);
+        updated_any_knot = true;
+    }
+    return updated_any_imu || updated_any_knot;
 }
 
 std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(

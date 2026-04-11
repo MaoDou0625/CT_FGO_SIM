@@ -64,6 +64,21 @@ void BuildIntervalPropagationCache(
     double bias_tau_s,
     IntervalPropagationCache& cache);
 
+bool UpdateIntervalPropagationCacheRange(
+    const ImuMeasurementArray& imu,
+    const NominalNavStates& nominal_states,
+    const spline::ControlPointArray& control_points,
+    double sigma_gyro_rps,
+    double sigma_accel_mps2,
+    double sigma_bg_std,
+    double sigma_ba_std,
+    double sigma_sg_std,
+    double sigma_sa_std,
+    double bias_tau_s,
+    double update_start_time,
+    double update_end_time,
+    IntervalPropagationCache& cache);
+
 std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(
     const IntervalPropagationCache& cache,
     double time);

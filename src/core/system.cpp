@@ -1558,23 +1558,42 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory(
     }
 
     try {
-        BuildIntervalPropagationCache(
-            imu_,
-            nominal_nav_,
-            control_points_,
-            config_.imu_sigma_gyro_rps,
-            config_.imu_sigma_accel_mps2,
-            config_.gyro_bias_rw_sigma,
-            config_.accel_bias_rw_sigma,
-            config_.gyro_scale_rw_sigma,
-            config_.accel_scale_rw_sigma,
-            config_.bias_tau_s,
-            interval_cache_);
+        if (use_inject_window) {
+            if (!UpdateIntervalPropagationCacheRange(
+                    imu_,
+                    nominal_nav_,
+                    control_points_,
+                    config_.imu_sigma_gyro_rps,
+                    config_.imu_sigma_accel_mps2,
+                    config_.gyro_bias_rw_sigma,
+                    config_.accel_bias_rw_sigma,
+                    config_.gyro_scale_rw_sigma,
+                    config_.accel_scale_rw_sigma,
+                    config_.bias_tau_s,
+                    inject_start,
+                    inject_end,
+                    interval_cache_)) {
+                LOG(WARNING) << "Local interval propagation cache update touched no intervals";
+            }
+        } else {
+            BuildIntervalPropagationCache(
+                imu_,
+                nominal_nav_,
+                control_points_,
+                config_.imu_sigma_gyro_rps,
+                config_.imu_sigma_accel_mps2,
+                config_.gyro_bias_rw_sigma,
+                config_.accel_bias_rw_sigma,
+                config_.gyro_scale_rw_sigma,
+                config_.accel_scale_rw_sigma,
+                config_.bias_tau_s,
+                interval_cache_);
+        }
     } catch (const std::exception& ex) {
-        LOG(ERROR) << "BuildIntervalPropagationCache failed after error-state injection: " << ex.what();
+        LOG(ERROR) << "Interval propagation cache update failed after error-state injection: " << ex.what();
         return false;
     } catch (...) {
-        LOG(ERROR) << "BuildIntervalPropagationCache failed with unknown exception after error-state injection";
+        LOG(ERROR) << "Interval propagation cache update failed with unknown exception after error-state injection";
         return false;
     }
 
