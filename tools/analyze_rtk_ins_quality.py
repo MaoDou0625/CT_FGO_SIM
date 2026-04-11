@@ -295,6 +295,42 @@ def save_plots(
     plt.close(fig)
 
 
+def save_position_error_blh_plot(
+    output_path: Path,
+    time_s: np.ndarray,
+    residual_pos: np.ndarray,
+    flags: dict[str, np.ndarray],
+) -> None:
+    # In the local ENU frame, latitude error maps to North, longitude error maps to East.
+    lat_lon_hgt_error_m = np.column_stack((residual_pos[:, 1], residual_pos[:, 0], residual_pos[:, 2]))
+    labels = ["Latitude / North error (m)", "Longitude / East error (m)", "Height / Up error (m)"]
+    flag_idx = np.flatnonzero(flags["any"])
+
+    fig, axes = plt.subplots(3, 1, figsize=(13, 8), sharex=True)
+    for axis_idx, ax in enumerate(axes):
+        values = lat_lon_hgt_error_m[:, axis_idx]
+        ax.plot(time_s, values, linewidth=1.0, label=labels[axis_idx])
+        if flag_idx.size:
+            ax.scatter(
+                time_s[flag_idx],
+                values[flag_idx],
+                s=18,
+                color="red",
+                alpha=0.75,
+                label="flagged RTK sample",
+                zorder=3,
+            )
+        ax.axhline(0.0, color="black", linewidth=0.7, alpha=0.5)
+        ax.set_ylabel(labels[axis_idx])
+        ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+        ax.legend(loc="best")
+    axes[-1].set_xlabel("time (s)")
+    fig.suptitle("RTK - INS position error with flagged samples")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
 def save_summary(
     output_path: Path,
     time_s: np.ndarray,
@@ -469,6 +505,12 @@ def main() -> None:
         nis,
         flags,
     )
+    save_position_error_blh_plot(
+        args.output_dir / "rtk_position_error_blh_flags.png",
+        time_s,
+        residual_pos,
+        flags,
+    )
     save_summary(
         args.output_dir / "rtk_ins_residual_summary.json",
         time_s,
@@ -496,6 +538,7 @@ def main() -> None:
     print(f"Wrote {args.output_dir / 'rtk_ins_residual_diagnostics.txt'}")
     print(f"Wrote {args.output_dir / 'rtk_quality_flags.txt'}")
     print(f"Wrote {args.output_dir / 'rtk_ins_residual_diagnostics.png'}")
+    print(f"Wrote {args.output_dir / 'rtk_position_error_blh_flags.png'}")
     print(f"Wrote {args.output_dir / 'rtk_ins_residual_summary.json'}")
 
 
