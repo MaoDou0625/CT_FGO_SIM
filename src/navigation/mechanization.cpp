@@ -1,6 +1,7 @@
 #include "ct_fgo_sim/navigation/mechanization.h"
 
 #include "ct_fgo_sim/navigation/earth.h"
+#include "ct_fgo_sim/navigation/nav_math.h"
 
 #include <algorithm>
 #include <cmath>
@@ -44,16 +45,6 @@ Eigen::Matrix3d BuildNedTriad(const Vector3d& down_axis, const Vector3d& earth_r
     return frame;
 }
 
-Eigen::Vector2d MeridianPrimeVerticalRadius(double lat_rad) {
-    const double sin_lat = std::sin(lat_rad);
-    const double den = 1.0 - kWgs84E1 * sin_lat * sin_lat;
-    const double sqrt_den = std::sqrt(den);
-    return {
-        kWgs84Ra * (1.0 - kWgs84E1) / (sqrt_den * den),
-        kWgs84Ra / sqrt_den,
-    };
-}
-
 Quaterniond RotvecToQuaternion(const Vector3d& rotvec) {
     const double angle = rotvec.norm();
     if (angle < 1.0e-12) {
@@ -73,14 +64,6 @@ Eigen::Matrix3d ExpRot(const Vector3d& rotvec) {
         return Eigen::Matrix3d::Identity();
     }
     return Eigen::AngleAxisd(angle, rotvec / angle).toRotationMatrix();
-}
-
-Matrix3d SkewSymmetric(const Vector3d& vector) {
-    Matrix3d mat;
-    mat << 0.0, -vector.z(), vector.y(),
-           vector.z(), 0.0, -vector.x(),
-          -vector.y(), vector.x(), 0.0;
-    return mat;
 }
 
 Quaterniond Qne(const Vector3d& blh) {
@@ -106,7 +89,7 @@ Vector3d BlhFromQne(const Quaterniond& qne, double height) {
 
 Matrix3d DRi(const Vector3d& blh) {
     Matrix3d dri = Matrix3d::Zero();
-    const Eigen::Vector2d rmn = MeridianPrimeVerticalRadius(blh.x());
+    const Eigen::Vector2d rmn = Earth::MeridianPrimeVerticalRadii(blh.x());
     dri(0, 0) = 1.0 / (rmn.x() + blh.z());
     dri(1, 1) = 1.0 / ((rmn.y() + blh.z()) * std::cos(blh.x()));
     dri(2, 2) = -1.0;
@@ -170,7 +153,7 @@ void KfVelUpdate(
     const MechImuSample& imucur) {
     static int debug_step = 0;
     const Matrix3d I33 = Matrix3d::Identity();
-    const Eigen::Vector2d rmrn = MeridianPrimeVerticalRadius(pvapre.blh.x());
+    const Eigen::Vector2d rmrn = Earth::MeridianPrimeVerticalRadii(pvapre.blh.x());
     Vector3d wie_n;
     Vector3d wen_n;
     wie_n << kWgs84Wie * std::cos(pvapre.blh.x()), 0.0, -kWgs84Wie * std::sin(pvapre.blh.x());
@@ -185,7 +168,7 @@ void KfVelUpdate(
     const Vector3d d_vfb = imucur.dvel + temp1 + temp2 + temp3;
 
     const Vector3d rot_half = (wie_n + wen_n) * imucur.dt / 2.0;
-    Matrix3d cnn = I33 - SkewSymmetric(rot_half);
+    Matrix3d cnn = I33 - SkewSymmetric3(rot_half);
     Vector3d d_vfn = cnn * pvapre.q_nb.toRotationMatrix() * d_vfb;
 
     Vector3d gl(0.0, 0.0, gravity);
@@ -200,13 +183,13 @@ void KfVelUpdate(
     midpos.z() = pvapre.blh.z() - midvel.z() * imucur.dt / 2.0;
     midpos = BlhFromQne(qne, midpos.z());
 
-    const Eigen::Vector2d rmrn_mid = MeridianPrimeVerticalRadius(midpos.x());
+    const Eigen::Vector2d rmrn_mid = Earth::MeridianPrimeVerticalRadii(midpos.x());
     wie_n << kWgs84Wie * std::cos(midpos.x()), 0.0, -kWgs84Wie * std::sin(midpos.x());
     wen_n << midvel.y() / (rmrn_mid.y() + midpos.z()),
              -midvel.x() / (rmrn_mid.x() + midpos.z()),
              -midvel.y() * std::tan(midpos.x()) / (rmrn_mid.y() + midpos.z());
 
-    cnn = I33 - SkewSymmetric((wie_n + wen_n) * imucur.dt / 2.0);
+    cnn = I33 - SkewSymmetric3((wie_n + wen_n) * imucur.dt / 2.0);
     d_vfn = cnn * pvapre.q_nb.toRotationMatrix() * d_vfb;
     gl << 0.0, 0.0, Earth::Gravity(midpos);
     d_vgn = (gl - (2.0 * wie_n + wen_n).cross(midvel)) * imucur.dt;
@@ -236,7 +219,7 @@ void KfPosUpdate(
     const Vector3d midvel = (pvacur.vel_ned + pvapre.vel_ned) / 2.0;
     const Vector3d midpos = pvapre.blh + DRi(pvapre.blh) * midvel * imucur.dt / 2.0;
 
-    const Eigen::Vector2d rmrn = MeridianPrimeVerticalRadius(midpos.x());
+    const Eigen::Vector2d rmrn = Earth::MeridianPrimeVerticalRadii(midpos.x());
     Vector3d wie_n;
     Vector3d wen_n;
     wie_n << kWgs84Wie * std::cos(midpos.x()), 0.0, -kWgs84Wie * std::sin(midpos.x());
@@ -270,13 +253,13 @@ void KfAttUpdate(
     midpos.z() = (pvapre.blh.z() + pvacur.blh.z()) / 2.0;
     midpos = BlhFromQne(qne_mid, midpos.z());
 
-    const Eigen::Vector2d rmrn = MeridianPrimeVerticalRadius(midpos.x());
+    const Eigen::Vector2d rmrn_att = Earth::MeridianPrimeVerticalRadii(midpos.x());
     Vector3d wie_n;
     Vector3d wen_n;
     wie_n << kWgs84Wie * std::cos(midpos.x()), 0.0, -kWgs84Wie * std::sin(midpos.x());
-    wen_n << midvel.y() / (rmrn.y() + midpos.z()),
-             -midvel.x() / (rmrn.x() + midpos.z()),
-             -midvel.y() * std::tan(midpos.x()) / (rmrn.y() + midpos.z());
+    wen_n << midvel.y() / (rmrn_att.y() + midpos.z()),
+             -midvel.x() / (rmrn_att.x() + midpos.z()),
+             -midvel.y() * std::tan(midpos.x()) / (rmrn_att.y() + midpos.z());
 
     const Quaterniond qnn = RotvecToQuaternion(-(wie_n + wen_n) * imucur.dt);
     const Quaterniond qbb = RotvecToQuaternion(imucur.dtheta + imupre.dtheta.cross(imucur.dtheta) / 12.0);

@@ -143,6 +143,11 @@ def load_ct_attitude(nav_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray
     time_s = data[:, 0]
     if nav_path.name == "nominal_nav.txt":
         qx, qy, qz, qw = data[:, 7], data[:, 8], data[:, 9], data[:, 10]
+    elif nav_path.name == "attitude_priority_nav.txt":
+        # time lat lon h vn ve vd rpy_deg qx qy qz qw
+        if data.shape[1] < 14:
+            raise RuntimeError(f"Unexpected attitude_priority_nav columns in {nav_path}")
+        qx, qy, qz, qw = data[:, 10], data[:, 11], data[:, 12], data[:, 13]
     else:
         qx, qy, qz, qw = data[:, 4], data[:, 5], data[:, 6], data[:, 7]
 
@@ -150,10 +155,13 @@ def load_ct_attitude(nav_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray
     pitch_out = np.empty_like(time_s)
     yaw_out = np.empty_like(time_s)
     for idx in range(len(time_s)):
-        rot_ct_enu_flu = quat_to_rotmat_xyzw(qx[idx], qy[idx], qz[idx], qw[idx])
-        # CT output quaternions are already expressed in the vehicle/body convention.
-        # For NED plotting we only need to rotate the navigation basis ENU -> NED.
-        rot_ct_ned_frd = R_ENU_FROM_NED.T @ rot_ct_enu_flu
+        rot_from_quat = quat_to_rotmat_xyzw(qx[idx], qy[idx], qz[idx], qw[idx])
+        if nav_path.name == "attitude_priority_nav.txt":
+            # attitude_priority_main: same q_nb->matrix convention as QuaternionToRpyDeg in C++.
+            rot_ct_ned_frd = rot_from_quat
+        else:
+            # Legacy CT exports: quaternion tied to an ENU navigation basis; map to NED for euler.
+            rot_ct_ned_frd = R_ENU_FROM_NED.T @ rot_from_quat
         roll_rad, pitch_rad, yaw_rad = rotmat_to_euler(rot_ct_ned_frd)
         roll_out[idx] = np.degrees(roll_rad)
         pitch_out[idx] = np.degrees(pitch_rad)

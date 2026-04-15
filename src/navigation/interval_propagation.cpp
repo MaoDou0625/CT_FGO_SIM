@@ -1,6 +1,7 @@
 #include "ct_fgo_sim/navigation/interval_propagation.h"
 
 #include "ct_fgo_sim/navigation/earth.h"
+#include "ct_fgo_sim/navigation/nav_math.h"
 
 #include <Eigen/Cholesky>
 #include <unsupported/Eigen/MatrixFunctions>
@@ -21,24 +22,6 @@ using Matrix30d = Eigen::Matrix<double, 30, 30>;
 
 constexpr double kTimeTolerance = 1.0e-6;
 
-Eigen::Vector2d MeridianPrimeVerticalRadius(double lat_rad) {
-    const double sin_lat = std::sin(lat_rad);
-    const double den = 1.0 - kWgs84E1 * sin_lat * sin_lat;
-    const double sqrt_den = std::sqrt(den);
-    return {
-        kWgs84Ra * (1.0 - kWgs84E1) / (sqrt_den * den),
-        kWgs84Ra / sqrt_den,
-    };
-}
-
-Matrix3d SkewSymmetric(const Vector3d& vector) {
-    Matrix3d mat;
-    mat << 0.0, -vector.z(), vector.y(),
-           vector.z(), 0.0, -vector.x(),
-          -vector.y(), vector.x(), 0.0;
-    return mat;
-}
-
 Matrix15d BuildF(
     const Vector3d& nominal_blh,
     const Vector3d& nominal_vel_ned,
@@ -47,7 +30,7 @@ Matrix15d BuildF(
     double bias_tau_s) {
     Matrix15d F = Matrix15d::Zero();
 
-    const Eigen::Vector2d rmrn = MeridianPrimeVerticalRadius(nominal_blh.x());
+    const Eigen::Vector2d rmrn = Earth::MeridianPrimeVerticalRadii(nominal_blh.x());
     const double gravity = Earth::Gravity(nominal_blh);
     const Vector3d wie_n = Earth::Iewn(nominal_blh.x());
     const Vector3d wen_n = Earth::Wnen(nominal_blh, nominal_vel_ned);
@@ -92,7 +75,7 @@ Matrix15d BuildF(
     temp(2, 0) = -2.0 * vn / rmh;
     temp(2, 1) = -2.0 * (kWgs84Wie * std::cos(lat) + ve / rnh);
     F.block<3, 3>(3, 3) = temp;
-    F.block<3, 3>(3, 6) = SkewSymmetric(f_n);
+    F.block<3, 3>(3, 6) = SkewSymmetric3(f_n);
     F.block<3, 3>(3, 12) = cbn;
 
     temp.setZero();
@@ -109,7 +92,7 @@ Matrix15d BuildF(
     temp(1, 0) = -1.0 / rmh;
     temp(2, 1) = -std::tan(lat) / rnh;
     F.block<3, 3>(6, 3) = temp;
-    F.block<3, 3>(6, 6) = -SkewSymmetric(wie_n + wen_n);
+    F.block<3, 3>(6, 6) = -SkewSymmetric3(wie_n + wen_n);
     F.block<3, 3>(6, 9) = -cbn;
 
     const double tau = std::max(1.0, bias_tau_s);

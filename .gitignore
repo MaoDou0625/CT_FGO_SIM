@@ -1,6 +1,9 @@
 build/
+build_agent/
+build_reconfig/
 build_zaxis/
 build_zAxisPro/
+.cursor_tmp/
 out/
 bin/
 output/

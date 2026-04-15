@@ -2,6 +2,8 @@
 
 #include "ct_fgo_sim/types.h"
 
+#include <Eigen/Core>
+
 #include <cmath>
 #include <utility>
 
@@ -11,6 +13,12 @@ inline constexpr double kWgs84Wie = 7.2921151467e-5;
 inline constexpr double kWgs84Ra = 6378137.0;
 inline constexpr double kWgs84E1 = 0.0066943799901413156;
 
+/// WGS84 helpers and local tangent-plane transforms in NED at `origin_blh`.
+///
+/// Conventions:
+/// - `blh`: (latitude rad, longitude rad, ellipsoidal height m).
+/// - `GlobalToLocal` / `LocalToGlobal` delta position: NED at origin (North, East, Down) [m].
+/// - Free velocity elsewhere in this project: `vel_ned` = (vn, ve, vd) in the same NED frame.
 class Earth {
 public:
     static double Gravity(const Vector3d& blh) {
@@ -69,10 +77,16 @@ public:
         return Cne(origin_blh).transpose() * (ecef1 - ecef0);
     }
 
-    static Vector3d LocalToGlobal(const Vector3d& origin_blh, const Vector3d& local_enu) {
+    static Vector3d LocalToGlobal(const Vector3d& origin_blh, const Vector3d& local_ned) {
         const Vector3d ecef0 = BlhToEcef(origin_blh);
-        const Vector3d ecef1 = ecef0 + Cne(origin_blh) * local_enu;
+        const Vector3d ecef1 = ecef0 + Cne(origin_blh) * local_ned;
         return EcefToBlh(ecef1);
+    }
+
+    /// Meridional radius Rm (`.x`) and prime vertical radius Rn (`.y`), meters.
+    static Eigen::Vector2d MeridianPrimeVerticalRadii(double lat_rad) {
+        const auto [rm, rn] = RmRn(lat_rad);
+        return {rm, rn};
     }
 
     static Vector3d Iewn(double lat_rad) {

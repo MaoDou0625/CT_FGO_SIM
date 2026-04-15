@@ -48,7 +48,8 @@ struct ContinuousInertialFactor {
         Eigen::Map<const Vec3T> lever_arm(lever_arm_ptr);
 
         const T td = td_ptr[0];
-        const T u = (T(t_meas_) + td - T(t0_)) / T(dt_);
+        const T u_raw = (T(t_meas_) + td - T(t0_)) / T(dt_);
+        const T u = ceres::fmin(ceres::fmax(u_raw, T(0.0)), T(1.0));
         const ResultT result = spline::BSplineEvaluator::Evaluate(u, T(dt_), t0, t1, t2, t3);
 
         const Vec3T bg = bg0_vec * (T(1) - u) + bg1_vec * u;

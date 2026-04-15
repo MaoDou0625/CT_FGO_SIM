@@ -1,3 +1,8 @@
+// Standalone demo: same local NED conventions as `mechanization.cpp` (vel_ned = vn,ve,vd;
+// q_nb body->NED; gravity along +Down as [0,0,+g] in the velocity equation; static alignment
+// uses down triad + Earth rate). IMU file is increments: dtheta/dt, dvel/dt with bg/ba in
+// rad/s and m/s^2; propagation uses dtheta−bg*dt and dvel−ba*dt like a minimal strapdown.
+
 #include "ct_fgo_sim/io/text_measurement_io.h"
 #include "ct_fgo_sim/navigation/earth.h"
 #include "ct_fgo_sim/types.h"
@@ -32,7 +37,7 @@ struct AttitudePriorityConfig {
 struct NavSample {
     double time = 0.0;
     Vector3d blh = Vector3d::Zero();
-    Vector3d vel_enu = Vector3d::Zero();
+    Vector3d vel_ned = Vector3d::Zero();
     Quaterniond q_nb = Quaterniond::Identity();
 };
 
@@ -42,19 +47,25 @@ struct StaticAlignmentResult {
     Vector3d ba0 = Vector3d::Zero();
 };
 
-Eigen::Matrix3d BuildTriadFrame(const Vector3d& primary, const Vector3d& secondary) {
-    const Vector3d t1 = primary.normalized();
-    Vector3d t2 = t1.cross(secondary);
-    if (t2.norm() < 1.0e-12) {
-        t2 = t1.unitOrthogonal();
+Eigen::Matrix3d BuildNedTriad(const Vector3d& down_axis, const Vector3d& earth_rate_axis) {
+    Vector3d down = down_axis.normalized();
+    Vector3d east = down.cross(earth_rate_axis);
+    if (east.norm() < 1.0e-12) {
+        east = down.unitOrthogonal();
     } else {
-        t2.normalize();
+        east.normalize();
     }
-    const Vector3d t3 = t1.cross(t2);
+    Vector3d north = east.cross(down);
+    if (north.norm() < 1.0e-12) {
+        north = east.unitOrthogonal();
+    } else {
+        north.normalize();
+    }
+
     Eigen::Matrix3d frame;
-    frame.col(0) = t1;
-    frame.col(1) = t2;
-    frame.col(2) = t3;
+    frame.col(0) = north;
+    frame.col(1) = east;
+    frame.col(2) = down;
     return frame;
 }
 
@@ -68,34 +79,37 @@ StaticAlignmentResult EstimateInitialAlignment(
     }
 
     const double t_end = imu.front().time + align_time_s;
-    Vector3d gyro_mean = Vector3d::Zero();
-    Vector3d accel_mean = Vector3d::Zero();
+    Vector3d gyro_rate_sum = Vector3d::Zero();
+    Vector3d accel_rate_sum = Vector3d::Zero();
     int count = 0;
     for (const auto& m : imu) {
         if (m.time > t_end) {
             break;
         }
-        gyro_mean += m.dtheta;
-        accel_mean += m.dvel;
+        if (m.dt <= 1.0e-9) {
+            continue;
+        }
+        gyro_rate_sum += m.dtheta / m.dt;
+        accel_rate_sum += m.dvel / m.dt;
         ++count;
     }
-    if (count < 10 || accel_mean.norm() < 1.0e-6 || gyro_mean.norm() < 1.0e-9) {
+    if (count < 10 || accel_rate_sum.norm() < 1.0e-6 || gyro_rate_sum.norm() < 1.0e-9) {
         return result;
     }
 
-    gyro_mean /= static_cast<double>(count);
-    accel_mean /= static_cast<double>(count);
+    const Vector3d gyro_mean = gyro_rate_sum / static_cast<double>(count);
+    const Vector3d accel_mean = accel_rate_sum / static_cast<double>(count);
 
-    const Vector3d up_b = accel_mean.normalized();
-    const Vector3d up_n = Vector3d::UnitZ();
+    const Vector3d down_b = -accel_mean.normalized();
+    const Vector3d down_n = Vector3d::UnitZ();
     const Vector3d wie_n = Earth::Iewn(origin_blh.x());
-    const Eigen::Matrix3d triad_b = BuildTriadFrame(up_b, gyro_mean.normalized());
-    const Eigen::Matrix3d triad_n = BuildTriadFrame(up_n, wie_n.normalized());
+    const Eigen::Matrix3d triad_b = BuildNedTriad(down_b, gyro_mean);
+    const Eigen::Matrix3d triad_n = BuildNedTriad(down_n, wie_n);
     result.q_nb = Quaterniond(triad_n * triad_b.transpose()).normalized();
 
     const Eigen::Matrix3d c_nb = result.q_nb.toRotationMatrix();
     const Vector3d expected_gyro_b = c_nb.transpose() * wie_n;
-    const Vector3d expected_accel_b = c_nb.transpose() * Vector3d(0.0, 0.0, Earth::Gravity(origin_blh));
+    const Vector3d expected_accel_b = c_nb.transpose() * Vector3d(0.0, 0.0, -Earth::Gravity(origin_blh));
     result.bg0 = gyro_mean - expected_gyro_b;
     result.ba0 = accel_mean - expected_accel_b;
     return result;
@@ -193,7 +207,7 @@ void SaveOutputs(
     std::filesystem::create_directories(config.output_path);
 
     std::ofstream nav_ofs(config.output_path / "attitude_priority_nav.txt");
-    nav_ofs << "# time_s lat_rad lon_rad h_m ve_mps vn_mps vu_mps roll_deg pitch_deg yaw_deg qx qy qz qw\n";
+    nav_ofs << "# time_s lat_rad lon_rad h_m vn_mps ve_mps vd_mps roll_deg pitch_deg yaw_deg qx qy qz qw\n";
     for (const auto& sample : nav) {
         const Vector3d rpy_deg = QuaternionToRpyDeg(sample.q_nb);
         nav_ofs << std::setprecision(17)
@@ -201,9 +215,9 @@ void SaveOutputs(
                 << sample.blh.x() << ' '
                 << sample.blh.y() << ' '
                 << sample.blh.z() << ' '
-                << sample.vel_enu.x() << ' '
-                << sample.vel_enu.y() << ' '
-                << sample.vel_enu.z() << ' '
+                << sample.vel_ned.x() << ' '
+                << sample.vel_ned.y() << ' '
+                << sample.vel_ned.z() << ' '
                 << rpy_deg.x() << ' '
                 << rpy_deg.y() << ' '
                 << rpy_deg.z() << ' '
@@ -269,7 +283,7 @@ int main(int argc, char** argv) {
     }
 
     auto gnss = ct_fgo_sim::io::LoadGnssFile(config.gnss_file);
-    auto imu = ct_fgo_sim::io::LoadImuFile(config.imu_file);
+    auto imu = ct_fgo_sim::io::LoadImuFile(config.imu_file, true);
     if (gnss.empty() || imu.empty()) {
         LOG(ERROR) << "No input measurements loaded";
         return 1;
@@ -293,12 +307,12 @@ int main(int argc, char** argv) {
     const ct_fgo_sim::StaticAlignmentResult alignment =
         ct_fgo_sim::EstimateInitialAlignment(imu, initial_blh, config.align_time_s);
     ct_fgo_sim::Quaterniond q_nb = alignment.q_nb;
-    ct_fgo_sim::Vector3d vel_enu = ct_fgo_sim::Vector3d::Zero();
+    ct_fgo_sim::Vector3d vel_ned = ct_fgo_sim::Vector3d::Zero();
 
     std::vector<ct_fgo_sim::NavSample> nav;
     nav.reserve(imu.size());
 
-    nav.push_back({imu.front().time, blh, vel_enu, q_nb});
+    nav.push_back({imu.front().time, blh, vel_ned, q_nb});
 
     for (size_t i = 1; i < imu.size(); ++i) {
         const auto& meas = imu[i];
@@ -310,26 +324,25 @@ int main(int argc, char** argv) {
             blh.z() = fixed_height;
         }
 
-        const ct_fgo_sim::Vector3d omega_corr = meas.dtheta - alignment.bg0;
-        const ct_fgo_sim::Vector3d f_corr = meas.dvel - alignment.ba0;
+        const ct_fgo_sim::Vector3d dtheta_corr = meas.dtheta - alignment.bg0 * meas.dt;
+        const ct_fgo_sim::Vector3d dvel_corr = meas.dvel - alignment.ba0 * meas.dt;
 
         const ct_fgo_sim::Vector3d wie_n = ct_fgo_sim::Earth::Iewn(blh.x());
-        const ct_fgo_sim::Vector3d wen_n = ct_fgo_sim::Earth::Wnen(blh, vel_enu);
+        const ct_fgo_sim::Vector3d wen_n = ct_fgo_sim::Earth::Wnen(blh, vel_ned);
         const Eigen::Matrix3d c_nb_old = q_nb.toRotationMatrix();
         const Eigen::Matrix3d c_nn = ct_fgo_sim::ExpRot(-(wie_n + wen_n) * meas.dt);
-        const Eigen::Matrix3d c_bb = ct_fgo_sim::ExpRot(omega_corr * meas.dt);
+        const Eigen::Matrix3d c_bb = ct_fgo_sim::ExpRot(dtheta_corr);
         const Eigen::Matrix3d c_nb_new = c_nn * c_nb_old * c_bb;
         q_nb = ct_fgo_sim::Quaterniond(c_nb_new).normalized();
 
-        const ct_fgo_sim::Vector3d gravity_n(0.0, 0.0, -ct_fgo_sim::Earth::Gravity(blh));
-        const ct_fgo_sim::Vector3d f_n = q_nb.toRotationMatrix() * f_corr;
-        const ct_fgo_sim::Vector3d coriolis = (2.0 * wie_n + wen_n).cross(vel_enu);
-        vel_enu += (f_n + gravity_n - coriolis) * meas.dt;
+        const ct_fgo_sim::Vector3d gravity_n(0.0, 0.0, ct_fgo_sim::Earth::Gravity(blh));
+        const ct_fgo_sim::Vector3d coriolis = (2.0 * wie_n + wen_n).cross(vel_ned);
+        vel_ned += c_nb_old * dvel_corr + (gravity_n - coriolis) * meas.dt;
         if (config.clamp_vertical_velocity) {
-            vel_enu.z() = 0.0;
+            vel_ned.z() = 0.0;
         }
 
-        nav.push_back({meas.time, blh, vel_enu, q_nb});
+        nav.push_back({meas.time, blh, vel_ned, q_nb});
     }
 
     ct_fgo_sim::SaveOutputs(config, initial_blh, alignment, nav);

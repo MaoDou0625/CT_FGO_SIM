@@ -1,0 +1,51 @@
+# 余杭推车 20260122_121901；数据与参数对齐
+# chapter5_module2 prepared_configs/zaxispro/YuHangTuiChe/20260122_121901_use__transformed1cut1/ct_fgo_sim.yaml
+# 输出改到 D:/Code/dataset/output/...
+
+gnssfile: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/rtk_ct_fgo_sim.txt"
+outputpath: "D:/Code/dataset/output/YuHangTuiChe/20260122_121901_use__transformed1cut1_zAxisPro"
+
+imu_main:
+  file: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/imu_ct_fgo_sim.txt"
+  columns: 7
+  rate_hz: 1000
+  values_are_increments: true
+  antlever: [0, 0, 0]
+
+body_frame:
+  q_body_imu_xyzw: [0.0, 0.0, 0.0, 1.0]
+  q_body_imu_prior_sigma_rad: 0.1
+  enable_nhc: true
+  estimate_q_body_imu: false
+  nhc_enable_vx: false
+  nhc_enable_vy: false
+  nhc_enable_vz: false
+  nhc_target_vx_mps: 0.0
+  nhc_target_vy_mps: 0.0
+  nhc_target_vz_mps: 0.0
+  nhc_sigma_vx_mps: 1000000.0
+  nhc_sigma_vy_mps: 1000000.0
+  nhc_sigma_vz_mps: 0.001
+
+starttime: 0.0
+endtime: 0.0
+aligntime: 100.0
+kf_interval_sec: 0.1
+gnss_sigma_horizontal_m: 0.02
+gnss_sigma_vertical_m: 0.050000000000000003
+gnss_vertical_robust:
+  enable: true
+  type: "huber"
+  scale_m: 0.029999999999999999
+gnss_vertical_deadzone:
+  enable: true
+  deadzone_m: 0.02
+  inside_scale: 0.01
+imu_sigma_accel_mps2: 0.2
+imu_sigma_gyro_rps: 0.01
+gyro_bias_rw_sigma: 1.0e-4
+accel_bias_rw_sigma: 1.0e-3
+bias_tau_s: 3600.0
+imu_stride: 10
+outer_iterations: 1
+solver_max_iterations: 30

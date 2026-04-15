@@ -1,19 +1,12 @@
 #include "ct_fgo_sim/core/system.h"
 
-#include "ct_fgo_sim/factors/bias_random_walk_factor.h"
-#include "ct_fgo_sim/factors/continuous_gnss_factor.h"
-#include "ct_fgo_sim/factors/continuous_inertial_factor.h"
-#include "ct_fgo_sim/factors/error_state_gnss_factor.h"
-#include "ct_fgo_sim/factors/error_state_interval_factor.h"
-#include "ct_fgo_sim/factors/error_state_nhc_factor.h"
-#include "ct_fgo_sim/factors/quaternion_prior_factor.h"
-#include "ct_fgo_sim/io/text_measurement_io.h"
+#include "ct_fgo_sim/core/app_yaml_io.h"
+#include "ct_fgo_sim/core/factor_graph_session.h"
+#include "ct_fgo_sim/core/spline_helpers.h"
+#include "ct_fgo_sim/spline/bspline_evaluator.h"
 
-#include <ceres/ceres.h>
 #include <glog/logging.h>
 #include <sophus/so3.hpp>
-#include <sophus/ceres_manifold.hpp>
-#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
 #include <cmath>
@@ -23,23 +16,12 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
-#include <thread>
 
 namespace ct_fgo_sim {
 
 namespace {
 
 constexpr double kDegToRad = M_PI / 180.0;
-
-int FindSplineWindowStart(const spline::ControlPointArray& control_points, double spline_dt_s, double t) {
-    if (control_points.size() < 4 || spline_dt_s <= 0.0) {
-        return -1;
-    }
-
-    const double t_first = control_points.front().Timestamp();
-    const int raw_index = static_cast<int>(std::floor((t - t_first) / spline_dt_s));
-    return std::clamp(raw_index, 0, static_cast<int>(control_points.size()) - 4);
-}
 
 double WrapAngleRad(double angle_rad) {
     while (angle_rad > M_PI) {
@@ -172,32 +154,69 @@ spline::ControlPointArray BuildKnotGridFromNominal(
 
     const double start_time = nominal_nav.front().time;
     const double end_time = nominal_nav.back().time;
-    std::vector<double> knot_times;
-    for (double t = start_time; t < end_time - 1.0e-9; t += knot_dt_s) {
+    const double span = end_time - start_time;
+
+    // Nominal nav times coincide with IMU propagation steps. Snapping interior knot targets to
+    // the nearest nominal sample makes knot_interval.end_time align with an IMU interval end
+    // (interval_propagation.cpp ~1e-6 s check), so ErrorStateIntervalFactor is not dropped.
+    const auto snap_to_nearest_nominal_time = [&](double t) -> double {
         const auto upper = std::lower_bound(
             nominal_nav.begin(),
             nominal_nav.end(),
             t,
             [](const NominalNavState& state, double time) { return state.time < time; });
-        double snapped_time = t;
         if (upper == nominal_nav.begin()) {
-            snapped_time = nominal_nav.front().time;
-        } else if (upper == nominal_nav.end()) {
-            snapped_time = nominal_nav.back().time;
-        } else {
-            const double t1 = upper->time;
-            const double t0 = (upper - 1)->time;
-            snapped_time = (std::abs(t1 - t) < std::abs(t - t0)) ? t1 : t0;
+            return nominal_nav.front().time;
         }
-        if (knot_times.empty() || std::abs(knot_times.back() - snapped_time) > 1.0e-9) {
-            knot_times.push_back(snapped_time);
+        if (upper == nominal_nav.end()) {
+            return nominal_nav.back().time;
         }
-    }
-    if (knot_times.empty() || std::abs(knot_times.back() - nominal_nav.back().time) > 1.0e-9) {
-        knot_times.push_back(nominal_nav.back().time);
-    }
-    if (knot_times.size() == 1 && nominal_nav.size() >= 2) {
-        knot_times.push_back(nominal_nav.back().time);
+        const double t1 = upper->time;
+        const double t0 = (upper - 1)->time;
+        return (std::abs(t1 - t) < std::abs(t - t0)) ? t1 : t0;
+    };
+
+    std::vector<double> knot_times;
+    if (span <= 1.0e-12) {
+        knot_times.push_back(start_time);
+    } else {
+        const int n_intervals =
+            std::max(3, static_cast<int>(std::ceil(span / knot_dt_s)));
+        const double dt_uniform = span / static_cast<double>(n_intervals);
+        knot_times.reserve(static_cast<size_t>(n_intervals) + 1U);
+        for (int i = 0; i <= n_intervals; ++i) {
+            const double ideal = start_time + dt_uniform * static_cast<double>(i);
+            double t_k = ideal;
+            if (i == 0) {
+                t_k = start_time;
+            } else if (i == n_intervals) {
+                t_k = end_time;
+            } else {
+                t_k = snap_to_nearest_nominal_time(ideal);
+            }
+            if (!knot_times.empty() && t_k <= knot_times.back() + 1.0e-9) {
+                const auto it = std::upper_bound(
+                    nominal_nav.begin(),
+                    nominal_nav.end(),
+                    knot_times.back(),
+                    [](double time, const NominalNavState& st) { return time < st.time; });
+                if (it == nominal_nav.end()) {
+                    break;
+                }
+                t_k = it->time;
+            }
+            if (!knot_times.empty() && t_k <= knot_times.back() + 1.0e-9) {
+                continue;
+            }
+            knot_times.push_back(t_k);
+        }
+        if (knot_times.empty() || std::abs(knot_times.back() - end_time) > 1.0e-9) {
+            if (knot_times.empty() || end_time > knot_times.back() + 1.0e-9) {
+                knot_times.push_back(end_time);
+            } else {
+                knot_times.back() = end_time;
+            }
+        }
     }
 
     knots.reserve(knot_times.size());
@@ -210,24 +229,6 @@ spline::ControlPointArray BuildKnotGridFromNominal(
         knots.emplace_back(t, Sophus::SE3d(nominal_state->q_nb, local_ned));
     }
     return knots;
-}
-
-int FindNodeIntervalStart(const spline::ControlPointArray& control_points, double t) {
-    if (control_points.size() < 2) {
-        return -1;
-    }
-    if (t <= control_points.front().Timestamp()) {
-        return 0;
-    }
-    if (t >= control_points.back().Timestamp()) {
-        return static_cast<int>(control_points.size()) - 2;
-    }
-    const auto upper = std::lower_bound(
-        control_points.begin(),
-        control_points.end(),
-        t,
-        [](const spline::ControlPoint& control_point, double time) { return control_point.Timestamp() < time; });
-    return std::max(0, static_cast<int>(std::distance(control_points.begin(), upper)) - 1);
 }
 
 Vector3d InterpolateNodeValue(
@@ -277,200 +278,12 @@ Eigen::Quaterniond EulerNedToQuaternion(const Vector3d& rpy_rad) {
 }  // namespace
 
 bool System::LoadConfig(const std::filesystem::path& config_path) {
-    const YAML::Node cfg = YAML::LoadFile(config_path.string());
-    const std::filesystem::path config_dir = config_path.parent_path();
-    if (!cfg["gnssfile"] || !cfg["imu_main"]) {
-        LOG(ERROR) << "Missing required nodes: gnssfile or imu_main";
+    ImuExtrinsicDefaults extra;
+    if (!LoadAppConfigYaml(config_path, config_, extra)) {
         return false;
     }
-
-    std::filesystem::path gnss_path = cfg["gnssfile"].as<std::string>();
-    if (gnss_path.is_relative()) {
-        gnss_path = config_dir / gnss_path;
-    }
-    config_.gnss_file = gnss_path.lexically_normal().string();
-
-    if (cfg["outputpath"]) {
-        std::filesystem::path output_path = cfg["outputpath"].as<std::string>();
-        if (output_path.is_relative()) {
-            output_path = config_dir / output_path;
-        }
-        config_.output_path = output_path.lexically_normal();
-    } else {
-        config_.output_path = (config_dir / "../output").lexically_normal();
-    }
-
-    if (cfg["kf_interval_sec"]) {
-        config_.spline_dt_s = cfg["kf_interval_sec"].as<double>();
-    }
-    if (cfg["starttime"]) {
-        config_.start_time = cfg["starttime"].as<double>();
-    }
-    if (cfg["endtime"]) {
-        config_.end_time = cfg["endtime"].as<double>();
-    }
-    if (cfg["aligntime"]) {
-        config_.align_time_s = cfg["aligntime"].as<double>();
-    }
-    if (cfg["gnss_sigma_horizontal_m"]) {
-        config_.gnss_sigma_horizontal_m = cfg["gnss_sigma_horizontal_m"].as<double>();
-    }
-    if (cfg["gnss_sigma_vertical_m"]) {
-        config_.gnss_sigma_vertical_m = cfg["gnss_sigma_vertical_m"].as<double>();
-    }
-    if (cfg["gnss_vertical_cauchy_scale_m"]) {
-        config_.gnss_vertical_cauchy_scale_m = cfg["gnss_vertical_cauchy_scale_m"].as<double>();
-    }
-    if (cfg["imu_sigma_accel_mps2"]) {
-        config_.imu_sigma_accel_mps2 = cfg["imu_sigma_accel_mps2"].as<double>();
-    }
-    if (cfg["imu_sigma_gyro_rps"]) {
-        config_.imu_sigma_gyro_rps = cfg["imu_sigma_gyro_rps"].as<double>();
-    }
-    if (cfg["gyro_bias_rw_sigma"]) {
-        config_.gyro_bias_rw_sigma = cfg["gyro_bias_rw_sigma"].as<double>();
-    }
-    if (cfg["accel_bias_rw_sigma"]) {
-        config_.accel_bias_rw_sigma = cfg["accel_bias_rw_sigma"].as<double>();
-    }
-    if (cfg["bias_tau_s"]) {
-        config_.bias_tau_s = cfg["bias_tau_s"].as<double>();
-    }
-    if (cfg["initial_yaw_feedback"]) {
-        const YAML::Node yaw_feedback = cfg["initial_yaw_feedback"];
-        if (yaw_feedback["enable"]) {
-            config_.enable_initial_yaw_feedback = yaw_feedback["enable"].as<bool>();
-        }
-        if (yaw_feedback["window_s"]) {
-            config_.initial_yaw_feedback_window_s = yaw_feedback["window_s"].as<double>();
-        }
-        if (yaw_feedback["min_speed_mps"]) {
-            config_.initial_yaw_feedback_min_speed_mps = yaw_feedback["min_speed_mps"].as<double>();
-        }
-        if (yaw_feedback["min_pairs"]) {
-            config_.initial_yaw_feedback_min_pairs = std::max(1, yaw_feedback["min_pairs"].as<int>());
-        }
-        if (yaw_feedback["max_abs_deg"]) {
-            config_.initial_yaw_feedback_max_abs_rad = yaw_feedback["max_abs_deg"].as<double>() * kDegToRad;
-        }
-    }
-    if (cfg["imu_stride"]) {
-        config_.imu_stride = std::max(1, cfg["imu_stride"].as<int>());
-    }
-    if (cfg["outer_iterations"]) {
-        config_.outer_iterations = std::max(1, cfg["outer_iterations"].as<int>());
-    }
-    if (cfg["solver_max_iterations"]) {
-        config_.solver_max_iterations = std::max(1, cfg["solver_max_iterations"].as<int>());
-    }
-    if (cfg["use_gnss_factors"]) {
-        config_.use_gnss_factors = cfg["use_gnss_factors"].as<bool>();
-    }
-    if (cfg["use_imu_factors"]) {
-        config_.use_imu_factors = cfg["use_imu_factors"].as<bool>();
-    }
-    if (cfg["output_query_dt_s"]) {
-        config_.output_query_dt_s = cfg["output_query_dt_s"].as<double>();
-    }
-    if (cfg["use_direct_spline_state"]) {
-        config_.use_direct_spline_state = cfg["use_direct_spline_state"].as<bool>();
-    }
-    if (cfg["initpos"] && cfg["initvel"] && cfg["initatt"]) {
-        const auto initpos = cfg["initpos"].as<std::vector<double>>();
-        const auto initvel = cfg["initvel"].as<std::vector<double>>();
-        const auto initatt = cfg["initatt"].as<std::vector<double>>();
-        if (initpos.size() == 3 && initvel.size() == 3 && initatt.size() == 3) {
-            config_.use_explicit_init_state = true;
-            config_.init_pos_blh = Vector3d(initpos[0] * kDegToRad, initpos[1] * kDegToRad, initpos[2]);
-            config_.init_vel_ned = Vector3d(initvel[0], initvel[1], initvel[2]);
-            config_.init_att_rpy_rad = Vector3d(initatt[0] * kDegToRad, initatt[1] * kDegToRad, initatt[2] * kDegToRad);
-        }
-    }
-    if (cfg["initgyrbias"]) {
-        const auto initbg = cfg["initgyrbias"].as<std::vector<double>>();
-        if (initbg.size() == 3) {
-            config_.init_bg_rps = Vector3d(initbg[0], initbg[1], initbg[2]) * (kDegToRad / 3600.0);
-        }
-    }
-    if (cfg["initaccbias"]) {
-        const auto initba = cfg["initaccbias"].as<std::vector<double>>();
-        if (initba.size() == 3) {
-            config_.init_ba_mps2 = Vector3d(initba[0], initba[1], initba[2]) * 1.0e-5;
-        }
-    }
-    if (cfg["body_frame"]) {
-        const YAML::Node body = cfg["body_frame"];
-        if (body["q_body_imu_xyzw"]) {
-            const auto v = body["q_body_imu_xyzw"].as<std::vector<double>>();
-            if (v.size() == 4) {
-                config_.body_frame.q_body_imu = Eigen::Quaterniond(v[3], v[0], v[1], v[2]).normalized();
-            }
-        }
-        if (body["q_body_imu_prior_sigma_rad"]) {
-            config_.body_frame.q_body_imu_prior_sigma_rad = body["q_body_imu_prior_sigma_rad"].as<double>();
-        }
-        if (body["nhc_file"]) {
-            std::filesystem::path nhc_path = body["nhc_file"].as<std::string>();
-            if (nhc_path.is_relative()) {
-                nhc_path = config_dir / nhc_path;
-            }
-            config_.body_frame.nhc_file = nhc_path.lexically_normal().string();
-        }
-        if (body["enable_nhc"]) {
-            config_.body_frame.enable_nhc = body["enable_nhc"].as<bool>();
-        }
-        if (body["estimate_q_body_imu"]) {
-            config_.body_frame.estimate_q_body_imu = body["estimate_q_body_imu"].as<bool>();
-        }
-        if (body["nhc_enable_vx"]) {
-            config_.body_frame.nhc_enable_vx = body["nhc_enable_vx"].as<bool>();
-        }
-        if (body["nhc_enable_vy"]) {
-            config_.body_frame.nhc_enable_vy = body["nhc_enable_vy"].as<bool>();
-        }
-        if (body["nhc_enable_vz"]) {
-            config_.body_frame.nhc_enable_vz = body["nhc_enable_vz"].as<bool>();
-        }
-        if (body["nhc_target_vx_mps"]) {
-            config_.body_frame.nhc_target_vx_mps = body["nhc_target_vx_mps"].as<double>();
-        }
-        if (body["nhc_target_vy_mps"]) {
-            config_.body_frame.nhc_target_vy_mps = body["nhc_target_vy_mps"].as<double>();
-        }
-        if (body["nhc_target_vz_mps"]) {
-            config_.body_frame.nhc_target_vz_mps = body["nhc_target_vz_mps"].as<double>();
-        }
-        if (body["nhc_sigma_vx_mps"]) {
-            config_.body_frame.nhc_sigma_vx_mps = body["nhc_sigma_vx_mps"].as<double>();
-        }
-        if (body["nhc_sigma_vy_mps"]) {
-            config_.body_frame.nhc_sigma_vy_mps = body["nhc_sigma_vy_mps"].as<double>();
-        }
-        if (body["nhc_sigma_vz_mps"]) {
-            config_.body_frame.nhc_sigma_vz_mps = body["nhc_sigma_vz_mps"].as<double>();
-        }
-    }
-
-    const YAML::Node imu = cfg["imu_main"];
-    std::filesystem::path imu_path = imu["file"].as<std::string>();
-    if (imu_path.is_relative()) {
-        imu_path = config_dir / imu_path;
-    }
-    config_.imu_main.file = imu_path.lexically_normal().string();
-    config_.imu_main.columns = imu["columns"] ? imu["columns"].as<int>() : 7;
-    config_.imu_main.rate_hz = imu["rate_hz"] ? imu["rate_hz"].as<double>() : 0.0;
-    if (imu["values_are_increments"]) {
-        config_.imu_main.values_are_increments = imu["values_are_increments"].as<bool>();
-    }
-    if (imu["antlever"]) {
-        const auto v = imu["antlever"].as<std::vector<double>>();
-        if (v.size() == 3) {
-            config_.imu_main.antlever = Vector3d(v[0], v[1], v[2]);
-        }
-    }
-
-    lever_arm_ = config_.imu_main.antlever;
-    initial_q_body_imu_ = config_.body_frame.q_body_imu;
+    lever_arm_ = extra.lever_arm;
+    initial_q_body_imu_ = extra.q_body_imu;
     q_body_imu_ = initial_q_body_imu_;
     return true;
 }
@@ -587,39 +400,11 @@ void System::Describe() const {
 }
 
 bool System::LoadMeasurements() {
-    gnss_ = io::LoadGnssFile(config_.gnss_file);
-    imu_ = io::LoadImuFile(config_.imu_main.file, config_.imu_main.values_are_increments);
-    if (config_.body_frame.enable_nhc && !config_.body_frame.nhc_file.empty()) {
-        nhc_ = io::LoadNhcFile(config_.body_frame.nhc_file);
-    } else {
-        nhc_.clear();
-    }
-    if (gnss_.empty()) {
-        LOG(ERROR) << "No GNSS measurements loaded from " << config_.gnss_file;
-        return false;
-    }
-    if (imu_.empty()) {
-        LOG(ERROR) << "No IMU measurements loaded from " << config_.imu_main.file;
-        return false;
-    }
-    if (config_.start_time == 0.0 && config_.end_time == 0.0) {
-        config_.start_time = std::max(gnss_.front().time, imu_.front().time);
-        config_.end_time = std::min(gnss_.back().time, imu_.back().time);
-    }
-    return true;
+    return LoadMeasurementBundle(config_, gnss_, imu_, nhc_, true);
 }
 
 void System::TrimMeasurementsToTimeWindow() {
-    auto in_window = [this](double t) { return t >= config_.start_time && t <= config_.end_time; };
-    gnss_.erase(
-        std::remove_if(gnss_.begin(), gnss_.end(), [&](const GnssMeasurement& m) { return !in_window(m.time); }),
-        gnss_.end());
-    imu_.erase(
-        std::remove_if(imu_.begin(), imu_.end(), [&](const ImuMeasurement& m) { return !in_window(m.time); }),
-        imu_.end());
-    nhc_.erase(
-        std::remove_if(nhc_.begin(), nhc_.end(), [&](const NhcMeasurement& m) { return !in_window(m.time); }),
-        nhc_.end());
+    TrimNavMeasurementsToConfigWindow(config_, gnss_, imu_, nhc_);
 }
 
 bool System::InitializeControlPoints() {
@@ -711,350 +496,24 @@ bool System::ResetControlPointsFromNominalTrajectory(bool reset_biases) {
 }
 
 bool System::BuildAndSolveProblem() {
-    if (control_points_.size() < 2) {
-        LOG(ERROR) << "Need at least 2 control points to build the problem";
-        return false;
-    }
-
-    if (config_.use_direct_spline_state) {
-        if (control_points_.size() < 4) {
-            LOG(ERROR) << "Direct spline-state mode needs at least 4 control points";
-            return false;
-        }
-
-        ceres::Problem problem;
-        for (auto& control_point : control_points_) {
-            problem.AddParameterBlock(
-                control_point.PoseData(),
-                Sophus::SE3d::num_parameters,
-                new Sophus::Manifold<Sophus::SE3>());
-        }
-        for (auto& delta_bg : delta_bg_nodes_) {
-            problem.AddParameterBlock(delta_bg.data(), 3);
-        }
-        for (auto& delta_ba : delta_ba_nodes_) {
-            problem.AddParameterBlock(delta_ba.data(), 3);
-        }
-        problem.AddParameterBlock(lever_arm_.data(), 3);
-        problem.AddParameterBlock(&time_offset_s_, 1);
-        problem.AddParameterBlock(q_body_imu_.coeffs().data(), 4, new ceres::EigenQuaternionManifold);
-
-        problem.SetParameterBlockConstant(control_points_.front().PoseData());
-        problem.SetParameterBlockConstant(delta_bg_nodes_.front().data());
-        problem.SetParameterBlockConstant(delta_ba_nodes_.front().data());
-        problem.SetParameterBlockConstant(lever_arm_.data());
-        problem.SetParameterBlockConstant(&time_offset_s_);
-        problem.SetParameterBlockConstant(q_body_imu_.coeffs().data());
-
-        int gnss_factor_count = 0;
-        if (config_.use_gnss_factors) {
-            for (const auto& gnss : gnss_) {
-                const int start = FindSplineWindowStart(control_points_, config_.spline_dt_s, gnss.time);
-                if (start < 0 || start + 3 >= static_cast<int>(control_points_.size())) {
-                    continue;
-                }
-                const double dt = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
-                if (dt <= 1.0e-9) {
-                    continue;
-                }
-                const Vector3d meas_pos_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
-                Matrix3d sqrt_info = Matrix3d::Zero();
-                sqrt_info(0, 0) = 1.0 / std::max(1.0e-6, config_.gnss_sigma_horizontal_m);
-                sqrt_info(1, 1) = 1.0 / std::max(1.0e-6, config_.gnss_sigma_horizontal_m);
-                sqrt_info(2, 2) = 1.0 / std::max(1.0e-6, config_.gnss_sigma_vertical_m);
-                problem.AddResidualBlock(
-                    factors::ContinuousGnssFactor::Create(
-                        gnss.time,
-                        dt,
-                        control_points_[start].Timestamp(),
-                        meas_pos_ned,
-                        sqrt_info),
-                    nullptr,
-                    control_points_[start].PoseData(),
-                    control_points_[start + 1].PoseData(),
-                    control_points_[start + 2].PoseData(),
-                    control_points_[start + 3].PoseData(),
-                    lever_arm_.data());
-                ++gnss_factor_count;
-            }
-        }
-
-        int inertial_factor_count = 0;
-        if (config_.use_imu_factors) {
-            const size_t imu_stride = static_cast<size_t>(std::max(1, config_.imu_stride));
-            for (size_t imu_index = 1; imu_index < imu_.size(); imu_index += imu_stride) {
-                const auto& meas = imu_[imu_index];
-                if (meas.dt <= 1.0e-9) {
-                    continue;
-                }
-                const int start = FindSplineWindowStart(control_points_, config_.spline_dt_s, meas.time);
-                if (start < 0 || start + 3 >= static_cast<int>(control_points_.size()) ||
-                    start + 1 >= static_cast<int>(delta_bg_nodes_.size()) ||
-                    start + 1 >= static_cast<int>(delta_ba_nodes_.size())) {
-                    continue;
-                }
-                const double dt = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
-                if (dt <= 1.0e-9) {
-                    continue;
-                }
-                const Vector3d gyro_meas = meas.dtheta / meas.dt;
-                const Vector3d accel_meas = meas.dvel / meas.dt;
-                problem.AddResidualBlock(
-                    factors::ContinuousInertialFactor::Create(
-                        meas.time,
-                        accel_meas,
-                        gyro_meas,
-                        origin_blh_,
-                        dt,
-                        control_points_[start].Timestamp(),
-                        config_.imu_sigma_accel_mps2,
-                        config_.imu_sigma_gyro_rps),
-                    nullptr,
-                    control_points_[start].PoseData(),
-                    control_points_[start + 1].PoseData(),
-                    control_points_[start + 2].PoseData(),
-                    control_points_[start + 3].PoseData(),
-                    delta_bg_nodes_[start].data(),
-                    delta_bg_nodes_[start + 1].data(),
-                    delta_ba_nodes_[start].data(),
-                    delta_ba_nodes_[start + 1].data(),
-                    lever_arm_.data(),
-                    &time_offset_s_);
-                ++inertial_factor_count;
-            }
-        }
-
-        int bias_rw_factor_count = 0;
-        for (int i = 0; i + 1 < static_cast<int>(control_points_.size()); ++i) {
-            const double dt = control_points_[i + 1].Timestamp() - control_points_[i].Timestamp();
-            if (dt <= 1.0e-9) {
-                continue;
-            }
-            problem.AddResidualBlock(
-                factors::BiasRandomWalkFactor::Create(dt, config_.gyro_bias_rw_sigma, config_.bias_tau_s),
-                nullptr,
-                delta_bg_nodes_[i].data(),
-                delta_bg_nodes_[i + 1].data());
-            problem.AddResidualBlock(
-                factors::BiasRandomWalkFactor::Create(dt, config_.accel_bias_rw_sigma, config_.bias_tau_s),
-                nullptr,
-                delta_ba_nodes_[i].data(),
-                delta_ba_nodes_[i + 1].data());
-            bias_rw_factor_count += 2;
-        }
-
-        ceres::Solver::Options options;
-        options.max_num_iterations = config_.solver_max_iterations;
-        options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
-        options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-        options.num_threads = std::max(1u, std::thread::hardware_concurrency());
-        options.minimizer_progress_to_stdout = true;
-
-        ceres::Solver::Summary summary;
-        ceres::Solve(options, &problem, &summary);
-
-        LOG(INFO) << "Direct spline GNSS factors: " << gnss_factor_count;
-        LOG(INFO) << "Direct spline inertial factors: " << inertial_factor_count;
-        LOG(INFO) << "Bias random-walk factors: " << bias_rw_factor_count;
-        LOG(INFO) << summary.BriefReport();
-        return summary.termination_type != ceres::FAILURE;
-    }
-
-    ceres::Problem problem;
-    for (auto& delta_theta : delta_theta_nodes_) {
-        problem.AddParameterBlock(delta_theta.data(), 3);
-    }
-    for (auto& delta_vel : delta_vel_nodes_) {
-        problem.AddParameterBlock(delta_vel.data(), 3);
-    }
-    for (auto& delta_pos : delta_pos_nodes_) {
-        problem.AddParameterBlock(delta_pos.data(), 3);
-    }
-    for (auto& delta_bg : delta_bg_nodes_) {
-        problem.AddParameterBlock(delta_bg.data(), 3);
-    }
-    for (auto& delta_ba : delta_ba_nodes_) {
-        problem.AddParameterBlock(delta_ba.data(), 3);
-    }
-    problem.AddParameterBlock(&time_offset_s_, 1);
-    problem.AddParameterBlock(q_body_imu_.coeffs().data(), 4, new ceres::EigenQuaternionManifold);
-    problem.SetParameterBlockConstant(delta_theta_nodes_.front().data());
-    problem.SetParameterBlockConstant(delta_vel_nodes_.front().data());
-    problem.SetParameterBlockConstant(delta_pos_nodes_.front().data());
-    problem.SetParameterBlockConstant(delta_bg_nodes_.front().data());
-    problem.SetParameterBlockConstant(delta_ba_nodes_.front().data());
-    problem.SetParameterBlockConstant(&time_offset_s_);
-    if (!(config_.body_frame.enable_nhc && config_.body_frame.estimate_q_body_imu)) {
-        problem.SetParameterBlockConstant(q_body_imu_.coeffs().data());
-    }
-
-    problem.AddResidualBlock(
-        factors::QuaternionPriorFactor::Create(
-            config_.body_frame.q_body_imu,
-            config_.body_frame.q_body_imu_prior_sigma_rad),
-        nullptr,
-        q_body_imu_.coeffs().data());
-
-    int gnss_horizontal_factor_count = 0;
-    int gnss_vertical_factor_count = 0;
-    if (config_.use_gnss_factors) {
-        for (const auto& gnss : gnss_) {
-            const int start = FindNodeIntervalStart(control_points_, gnss.time);
-            if (start < 0 || start + 1 >= static_cast<int>(control_points_.size())) {
-                continue;
-            }
-            const auto nominal_state = EvaluateNominalState(nominal_nav_, gnss.time);
-            if (!nominal_state) {
-                continue;
-            }
-            const double dt = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
-            if (dt <= 1.0e-9) {
-                continue;
-            }
-            const double u = std::clamp((gnss.time - control_points_[start].Timestamp()) / dt, 0.0, 1.0);
-            const Vector3d nominal_pos_ned = Earth::GlobalToLocal(origin_blh_, nominal_state->blh);
-            const Vector3d meas_pos_ned = Earth::GlobalToLocal(origin_blh_, gnss.blh);
-
-            problem.AddResidualBlock(
-                factors::ErrorStateGnssHorizontalLeverArmFactor::Create(
-                    u,
-                    nominal_pos_ned,
-                    nominal_state->q_nb,
-                    lever_arm_,
-                    meas_pos_ned,
-                    config_.gnss_sigma_horizontal_m),
-                nullptr,
-                delta_pos_nodes_[start].data(),
-                delta_pos_nodes_[start + 1].data(),
-                delta_theta_nodes_[start].data(),
-                delta_theta_nodes_[start + 1].data());
-            ++gnss_horizontal_factor_count;
-
-            ceres::LossFunction* vertical_loss = nullptr;
-            if (config_.gnss_vertical_cauchy_scale_m > 0.0) {
-                const double whitened_scale =
-                    config_.gnss_vertical_cauchy_scale_m / std::max(1.0e-6, config_.gnss_sigma_vertical_m);
-                vertical_loss = new ceres::CauchyLoss(whitened_scale);
-            }
-            problem.AddResidualBlock(
-                factors::ErrorStateGnssVerticalLeverArmFactor::Create(
-                    u,
-                    nominal_pos_ned,
-                    nominal_state->q_nb,
-                    lever_arm_,
-                    meas_pos_ned,
-                    config_.gnss_sigma_vertical_m),
-                vertical_loss,
-                delta_pos_nodes_[start].data(),
-                delta_pos_nodes_[start + 1].data(),
-                delta_theta_nodes_[start].data(),
-                delta_theta_nodes_[start + 1].data());
-            ++gnss_vertical_factor_count;
-        }
-    }
-
-    int nhc_factor_count = 0;
-    if (config_.body_frame.enable_nhc) {
-        const bool any_axis_enabled =
-            config_.body_frame.nhc_enable_vx || config_.body_frame.nhc_enable_vy || config_.body_frame.nhc_enable_vz;
-        const Vector3d sigma_body_mps(
-            config_.body_frame.nhc_enable_vx ? config_.body_frame.nhc_sigma_vx_mps : -1.0,
-            config_.body_frame.nhc_enable_vy ? config_.body_frame.nhc_sigma_vy_mps : -1.0,
-            config_.body_frame.nhc_enable_vz ? config_.body_frame.nhc_sigma_vz_mps : -1.0);
-        if (any_axis_enabled) {
-            const size_t nhc_stride = static_cast<size_t>(std::max(1, config_.imu_stride));
-            for (size_t nhc_index = 0; nhc_index < nhc_.size(); nhc_index += nhc_stride) {
-                const auto& nhc = nhc_[nhc_index];
-                const int start = FindNodeIntervalStart(control_points_, nhc.time);
-                if (start < 0 || start + 1 >= static_cast<int>(control_points_.size())) {
-                    continue;
-                }
-                const auto nominal_state = EvaluateNominalState(nominal_nav_, nhc.time);
-                if (!nominal_state) {
-                    continue;
-                }
-                const double dt = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
-                if (dt <= 1.0e-9) {
-                    continue;
-                }
-                const double u = std::clamp((nhc.time - control_points_[start].Timestamp()) / dt, 0.0, 1.0);
-                Vector3d target_vel_body(
-                    config_.body_frame.nhc_target_vx_mps,
-                    config_.body_frame.nhc_target_vy_mps,
-                    config_.body_frame.nhc_target_vz_mps);
-                if (config_.body_frame.nhc_enable_vx) {
-                    target_vel_body.x() = nhc.vel_body_mps.x();
-                }
-                if (config_.body_frame.nhc_enable_vy) {
-                    target_vel_body.y() = nhc.vel_body_mps.y();
-                }
-                if (config_.body_frame.nhc_enable_vz) {
-                    target_vel_body.z() = nhc.vel_body_mps.z();
-                }
-
-                problem.AddResidualBlock(
-                    factors::ErrorStateBodyVelocityNhcFactor::Create(
-                        u,
-                        nominal_state->q_nb,
-                        nominal_state->vel_ned,
-                        target_vel_body,
-                        sigma_body_mps),
-                    nullptr,
-                    delta_theta_nodes_[start].data(),
-                    delta_theta_nodes_[start + 1].data(),
-                    delta_vel_nodes_[start].data(),
-                    delta_vel_nodes_[start + 1].data(),
-                    q_body_imu_.coeffs().data());
-                ++nhc_factor_count;
-            }
-        }
-    }
-
-    int process_factor_count = 0;
-    if (config_.use_imu_factors) {
-        for (int i = 0; i + 1 < static_cast<int>(control_points_.size()); ++i) {
-            if (i >= static_cast<int>(interval_cache_.knot_intervals.size())) {
-                continue;
-            }
-            const auto& knot_interval = interval_cache_.knot_intervals[static_cast<size_t>(i)];
-            if (!knot_interval.valid) {
-                continue;
-            }
-            problem.AddResidualBlock(
-                factors::ErrorStateIntervalFactor::Create(
-                    knot_interval.phi,
-                    knot_interval.sqrt_info),
-                nullptr,
-                delta_theta_nodes_[i].data(),
-                delta_vel_nodes_[i].data(),
-                delta_pos_nodes_[i].data(),
-                delta_bg_nodes_[i].data(),
-                delta_ba_nodes_[i].data(),
-                delta_theta_nodes_[i + 1].data(),
-                delta_vel_nodes_[i + 1].data(),
-                delta_pos_nodes_[i + 1].data(),
-                delta_bg_nodes_[i + 1].data(),
-                delta_ba_nodes_[i + 1].data());
-            ++process_factor_count;
-        }
-    }
-
-    ceres::Solver::Options options;
-    options.max_num_iterations = config_.solver_max_iterations;
-    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
-    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    options.num_threads = std::max(1u, std::thread::hardware_concurrency());
-    options.minimizer_progress_to_stdout = true;
-
-    ceres::Solver::Summary summary;
-    ceres::Solve(options, &problem, &summary);
-
-    LOG(INFO) << "GNSS factors (horizontal / vertical): "
-              << gnss_horizontal_factor_count << " / " << gnss_vertical_factor_count;
-    LOG(INFO) << "NHC factors: " << nhc_factor_count;
-    LOG(INFO) << "Interval propagation factors: " << process_factor_count;
-    LOG(INFO) << summary.BriefReport();
-    return summary.termination_type != ceres::FAILURE;
+    FactorGraphSession session{};
+    session.config = &config_;
+    session.origin_blh = &origin_blh_;
+    session.gnss = &gnss_;
+    session.imu = &imu_;
+    session.nhc = &nhc_;
+    session.control_points = &control_points_;
+    session.delta_theta_nodes = &delta_theta_nodes_;
+    session.delta_vel_nodes = &delta_vel_nodes_;
+    session.delta_pos_nodes = &delta_pos_nodes_;
+    session.delta_bg_nodes = &delta_bg_nodes_;
+    session.delta_ba_nodes = &delta_ba_nodes_;
+    session.lever_arm = &lever_arm_;
+    session.time_offset_s = &time_offset_s_;
+    session.q_body_imu = &q_body_imu_;
+    session.nominal_nav = &nominal_nav_;
+    session.interval_cache = &interval_cache_;
+    return BuildAndSolveFactorGraph(session);
 }
 
 bool System::ApplyInitialYawFeedbackFromGnss() {
@@ -1282,7 +741,7 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
     }
 
     if (config_.use_direct_spline_state && control_points_.size() >= 4) {
-        const int start = FindSplineWindowStart(control_points_, config_.spline_dt_s, time);
+        const int start = FindSplineWindowStart(control_points_, time);
         if (start < 0 || start + 3 >= static_cast<int>(control_points_.size())) {
             return std::nullopt;
         }

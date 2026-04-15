@@ -24,7 +24,11 @@ struct ContinuousGnssFactor {
         const SE3T t3 = Eigen::Map<const SE3T>(p3);
         Eigen::Map<const Vec3T> lever_arm(lever_arm_ptr);
 
-        const T u = (T(t_) - T(t0_)) / T(dt_);
+        // Match System::EvaluateComposedState: Zevesilov segment is evaluated on u in [0, 1].
+        // Window start is clamped so t can lie outside [t0, t0+dt]; without clamp, factors extrapolate
+        // while exported trajectory clamps u, causing sparse huge ENU spikes after optimization.
+        const T u_raw = (T(t_) - T(t0_)) / T(dt_);
+        const T u = ceres::fmin(ceres::fmax(u_raw, T(0.0)), T(1.0));
         const ResultT result = spline::BSplineEvaluator::Evaluate(u, T(dt_), t0, t1, t2, t3);
         const Vec3T p = result.pose.translation() + result.pose.so3() * lever_arm;
 
