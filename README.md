@@ -1,15 +1,21 @@
-# CT_FGO_SIM zAxisPro-error-state-mature
+# CT_FGO_SIM · zAxisPro sliding window + marginalization
 
-This branch is a **mature error-state FGO** line: nominal trajectory plus interpolated `delta_pos`, `delta_vel`, `delta_theta` (and bias nodes), with **IMU interval propagation** factors and optional NHC. The earlier **direct spline-state (Zevesilov SE(3) control-point) path has been removed** from the codebase to reduce dual-mode confusion and maintenance cost.
+This branch extends the **mature error-state FGO** baseline (`zAxisPro-error-state-mature`): nominal trajectory plus interpolated `delta_pos`, `delta_vel`, `delta_theta` (and bias nodes), with **IMU interval propagation** factors and optional NHC. The focus here is **sliding-window optimization** and **marginalization** (linearized priors on dropped states) for bounded-memory or streaming-style estimation on the same error-state graph.
 
 Road-profile / IRI experiments can still use dense trajectory output and vertical GNSS tuning; interpret results in the error-state formulation.
 
-## Current scope
+## Inherited scope (unchanged formulation)
 
 - Error-state continuous-time FGO on a knot grid aligned with `nominal_nav` / IMU boundaries
 - IMU and GNSS/RTK fusion (`ErrorStateIntervalFactor`, `ErrorStateGnss*` factors)
 - Optional body-frame NHC (`ErrorStateBodyVelocityNhcFactor`)
 - Dense trajectory querying (`output_query_dt_s`, `dense_trajectory_enu.txt`)
+
+## Target scope on this branch
+
+- **Sliding window** over knot / interval states (fixed lag or controlled window growth)
+- **Marginalization** of states that leave the window (Schur complement / information-form prior carried forward)
+- Config surface for window length, marginalization policy, and reuse of existing YAML knobs where possible
 
 ## YAML highlights
 
@@ -22,7 +28,7 @@ There is **no** `use_direct_spline_state` switch; only one optimization backend 
 
 ## Historical note
 
-The repository previously carried a **direct spline-state** experiment (`ContinuousGnssFactor` / `ContinuousInertialFactor` on `SE3` control points). That path was removed on this branch. Historical discussion of vertical GNSS coupling into `delta_pos` and IRI metrics still applies to **error-state** tuning.
+The repository previously carried a **direct spline-state** experiment (`ContinuousGnssFactor` / `ContinuousInertialFactor` on `SE3` control points). That path was removed on the error-state baseline. Historical discussion of vertical GNSS coupling into `delta_pos` and IRI metrics still applies to **error-state** tuning.
 
 ## Build
 
@@ -48,4 +54,4 @@ D:\Code\CT_FGO_SIM_zAxisPro\build\Release\ct_fgo_sim_main.exe D:\Code\CT_FGO_SIM
 
 ## Status
 
-**`zAxisPro-error-state-mature`** — error-state FGO only; suitable as the maintained variant for thesis-oriented road reconstruction without the removed direct-spline code path.
+**`zAxisPro-sliding-window-marginalization`** — development line for **sliding-window** error-state FGO with **marginalization**; builds on `zAxisPro-error-state-mature` without restoring the removed direct-spline path.
