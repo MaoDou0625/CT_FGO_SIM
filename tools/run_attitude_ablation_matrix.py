@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 
-CT_REPO = Path(r"D:\Code\CT_FGO_SIM")
+CT_REPO = Path(r"D:\Code\CT_FGO_SIM_sliding-window")
 CT_EXE = CT_REPO / "build" / "Release" / "ct_fgo_sim_main.exe"
 CT_PLOT = CT_REPO / "tools" / "plot_outputs.py"
 KF_REPO = Path(r"D:\Code\kf_gins_used_in_paper")

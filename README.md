@@ -1,4 +1,4 @@
-# CT_FGO_SIM · zAxisPro sliding window + marginalization
+# CT_FGO_SIM · sliding window + marginalization
 
 This branch extends the **mature error-state FGO** baseline (`zAxisPro-error-state-mature`): nominal trajectory plus interpolated `delta_pos`, `delta_vel`, `delta_theta` (and bias nodes), with **IMU interval propagation** factors and optional NHC. The focus here is **sliding-window optimization** and **marginalization** (linearized priors on dropped states) for bounded-memory or streaming-style estimation on the same error-state graph.
 
@@ -33,14 +33,14 @@ The repository previously carried a **direct spline-state** experiment (`Continu
 ## Build
 
 ```powershell
-cmake -S D:\Code\CT_FGO_SIM_zAxisPro -B D:\Code\CT_FGO_SIM_zAxisPro\build
-cmake --build D:\Code\CT_FGO_SIM_zAxisPro\build --config Release
+cmake -S D:\Code\CT_FGO_SIM_sliding-window -B D:\Code\CT_FGO_SIM_sliding-window\build
+cmake --build D:\Code\CT_FGO_SIM_sliding-window\build --config Release
 ```
 
 ## Run
 
 ```powershell
-D:\Code\CT_FGO_SIM_zAxisPro\build\Release\ct_fgo_sim_main.exe D:\Code\CT_FGO_SIM_zAxisPro\config\minimal.yaml
+D:\Code\CT_FGO_SIM_sliding-window\build\Release\ct_fgo_sim_main.exe D:\Code\CT_FGO_SIM_sliding-window\config\minimal.yaml
 ```
 
 ## Primary implementation files
@@ -54,4 +54,4 @@ D:\Code\CT_FGO_SIM_zAxisPro\build\Release\ct_fgo_sim_main.exe D:\Code\CT_FGO_SIM
 
 ## Status
 
-**`zAxisPro-sliding-window-marginalization`** — development line for **sliding-window** error-state FGO with **marginalization**; builds on `zAxisPro-error-state-mature` without restoring the removed direct-spline path.
+**`zAxisPro-sliding-window-marginalization`** — development line for **sliding-window** error-state FGO with **marginalization**; builds on `zAxisPro-error-state-mature` without restoring the removed direct-spline path. Local checkout folder: **`CT_FGO_SIM_sliding-window`**.

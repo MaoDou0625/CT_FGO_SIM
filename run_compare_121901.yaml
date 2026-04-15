@@ -1,5 +1,5 @@
 gnssfile: "D:/Code/dataset/YuHangTuiChe/ct_fgo_sim_use/20260122_121901_use/transformed1cut1/rtk_ct_fgo_sim.txt"
-outputpath: "D:/Code/CT_FGO_SIM/output"
+outputpath: "D:/Code/CT_FGO_SIM_sliding-window/output"
 
 imu_main:
   file: "D:/Code/dataset/YuHangTuiChe/kf_gins_use/20260122_121901_use/transformed1cut1/imu_kfgins.txt"

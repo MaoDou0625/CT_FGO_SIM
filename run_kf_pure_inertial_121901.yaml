@@ -1,6 +1,6 @@
 imupath: "D:/Code/dataset/YuHangTuiChe/kf_gins_use/20260122_121901_use/transformed1cut1/imu_kfgins.txt"
-gnsspath: "D:/Code/CT_FGO_SIM/output_kf_pure_inertial_121901/fake_gnss_after_end.txt"
-outputpath: "D:/Code/CT_FGO_SIM/output_kf_pure_inertial_121901"
+gnsspath: "D:/Code/CT_FGO_SIM_sliding-window/output_kf_pure_inertial_121901/fake_gnss_after_end.txt"
+outputpath: "D:/Code/CT_FGO_SIM_sliding-window/output_kf_pure_inertial_121901"
 
 imudatalen: 7
 imudatarate: 1000

@@ -1,5 +1,5 @@
 gnssfile: "D:/Code/dataset/YuHangTuiChe/kf_gins_use/20260122_155826_use/transformed1cut1/rtk_ct_fgo_sim.txt"
-outputpath: "D:/Code/CT_FGO_SIM/output_pure_inertial_155826_kf_source"
+outputpath: "D:/Code/CT_FGO_SIM_sliding-window/output_pure_inertial_155826_kf_source"
 
 imu_main:
   file: "D:/Code/dataset/YuHangTuiChe/kf_gins_use/20260122_155826_use/transformed1cut1/imu_kfgins.txt"

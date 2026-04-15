@@ -36,7 +36,7 @@
 
 运行 `ct_fgo_sim_main` 时，在 YAML 的 `outputpath` 中指定该目录下的子文件夹（程序会 `create_directories`），避免与原始数据混放。
 
-## CT_FGO_SIM_zAxisPro：余杭推车示例运行
+## CT_FGO_SIM_sliding-window：余杭推车示例运行
 
 **参考 YAML（chapter5 已整理配置，字段与数据切片一致）**
 
@@ -52,17 +52,17 @@
 **命令示例（Release 可执行文件路径按本机 build 目录调整）**
 
 ```text
-D:\Code\CT_FGO_SIM_zAxisPro\build\Release\ct_fgo_sim_main.exe D:\Code\CT_FGO_SIM_zAxisPro\config\run_yuhang_121901_dataset_output.yaml
+D:\Code\CT_FGO_SIM_sliding-window\build\Release\ct_fgo_sim_main.exe D:\Code\CT_FGO_SIM_sliding-window\config\run_yuhang_121901_dataset_output.yaml
 ```
 
 **导航 vs RTK 经纬高曲线**
 
-- 脚本：`CT_FGO_SIM_zAxisPro/tools/plot_nav_vs_rtk_blh.py`
+- 脚本：`CT_FGO_SIM_sliding-window/tools/plot_nav_vs_rtk_blh.py`
 - 通过 `importlib` 加载 `D:\googleYun\30Code\chapter5_module2\run_chapter5_module2_kf_gins_pipeline.py`，复用其中 **WGS84 常数**（`WGS84_RA`、`WGS84_E1`、`RAD2DEG`）；经纬高由 `trajectory_enu.txt` + `run_summary.txt` 中的 `origin_blh_rad` 按与 `Earth::LocalToGlobal` 一致的 ECEF 链换算。
 - 默认读上述输出目录，并写 `nav_vs_rtk_blh.png` 到同一输出文件夹；RTK 默认取 `run_summary.txt` 里的 `gnss_file`。
 
 ```text
-python D:\Code\CT_FGO_SIM_zAxisPro\tools\plot_nav_vs_rtk_blh.py --output-dir D:\Code\dataset\output\YuHangTuiChe\20260122_121901_use__transformed1cut1_zAxisPro
+python D:\Code\CT_FGO_SIM_sliding-window\tools\plot_nav_vs_rtk_blh.py --output-dir D:\Code\dataset\output\YuHangTuiChe\20260122_121901_use__transformed1cut1_zAxisPro
 ```
 
 ---

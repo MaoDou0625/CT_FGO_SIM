@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 
-REPO_ROOT = Path(r"D:\Code\CT_FGO_SIM")
+REPO_ROOT = Path(r"D:\Code\CT_FGO_SIM_sliding-window")
 EXE_PATH = REPO_ROOT / "build" / "Release" / "ct_fgo_sim_main.exe"
 PLOT_SCRIPT = REPO_ROOT / "tools" / "plot_outputs.py"
 INPUT_ROOT = Path(r"D:\Code\dataset\YuHangTuiChe\ct_fgo_sim_use")
