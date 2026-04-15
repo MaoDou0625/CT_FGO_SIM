@@ -3,7 +3,6 @@
 #include "ct_fgo_sim/core/app_yaml_io.h"
 #include "ct_fgo_sim/core/factor_graph_session.h"
 #include "ct_fgo_sim/core/spline_helpers.h"
-#include "ct_fgo_sim/spline/bspline_evaluator.h"
 
 #include <glog/logging.h>
 #include <sophus/so3.hpp>
@@ -350,9 +349,6 @@ bool System::Run() {
         if (!BuildAndSolveProblem()) {
             return false;
         }
-        if (config_.use_direct_spline_state) {
-            continue;
-        }
         if (outer_iter + 1 < config_.outer_iterations) {
             ApplyInitialYawFeedbackFromGnss();
         }
@@ -389,7 +385,6 @@ void System::Describe() const {
     LOG(INFO) << "Use GNSS factors: " << (config_.use_gnss_factors ? "true" : "false");
     LOG(INFO) << "Use IMU factors: " << (config_.use_imu_factors ? "true" : "false");
     LOG(INFO) << "Output query dt: " << config_.output_query_dt_s;
-    LOG(INFO) << "Use direct spline state: " << (config_.use_direct_spline_state ? "true" : "false");
     LOG(INFO) << "Enable body NHC: " << (config_.body_frame.enable_nhc ? "true" : "false");
     LOG(INFO) << "Estimate q_body_imu: "
               << ((config_.body_frame.enable_nhc && config_.body_frame.estimate_q_body_imu) ? "true" : "false");
@@ -738,49 +733,6 @@ std::optional<ComposedState> System::EvaluateComposedState(double time) const {
     const auto nominal_state = EvaluateNominalState(nominal_nav_, time);
     if (!nominal_state) {
         return std::nullopt;
-    }
-
-    if (config_.use_direct_spline_state && control_points_.size() >= 4) {
-        const int start = FindSplineWindowStart(control_points_, time);
-        if (start < 0 || start + 3 >= static_cast<int>(control_points_.size())) {
-            return std::nullopt;
-        }
-        const double dt = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
-        if (dt <= 1.0e-9) {
-            return std::nullopt;
-        }
-        const double u = std::clamp((time - control_points_[start].Timestamp()) / dt, 0.0, 1.0);
-        const auto result = spline::BSplineEvaluator::Evaluate(
-            u,
-            dt,
-            control_points_[start].Pose(),
-            control_points_[start + 1].Pose(),
-            control_points_[start + 2].Pose(),
-            control_points_[start + 3].Pose());
-
-        ComposedState composed;
-        composed.time = time;
-        composed.nominal = *nominal_state;
-        composed.full_pose = result.pose;
-        composed.full_vel_ned = result.v_world;
-        composed.full_vel_body = result.v_body;
-        composed.full_accel_ned = result.a_world;
-        composed.full_omega_body = result.w_body;
-        composed.full_alpha_body = result.alpha_body;
-
-        if (const auto delta_bg = EvaluateNodeValueAtTime(time, delta_bg_nodes_)) {
-            composed.full_bg = initial_alignment_.bg0 + *delta_bg;
-            composed.full_omega_body += composed.full_bg;
-        } else {
-            composed.full_bg = initial_alignment_.bg0;
-            composed.full_omega_body += composed.full_bg;
-        }
-        if (const auto delta_ba = EvaluateNodeValueAtTime(time, delta_ba_nodes_)) {
-            composed.full_ba = initial_alignment_.ba0 + *delta_ba;
-        } else {
-            composed.full_ba = initial_alignment_.ba0;
-        }
-        return composed;
     }
 
     if (control_points_.empty()) {

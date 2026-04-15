@@ -123,9 +123,6 @@ bool LoadAppConfigYaml(
     if (cfg["output_query_dt_s"]) {
         config.output_query_dt_s = cfg["output_query_dt_s"].as<double>();
     }
-    if (cfg["use_direct_spline_state"]) {
-        config.use_direct_spline_state = cfg["use_direct_spline_state"].as<bool>();
-    }
     if (cfg["initpos"] && cfg["initvel"] && cfg["initatt"]) {
         const auto initpos = cfg["initpos"].as<std::vector<double>>();
         const auto initvel = cfg["initvel"].as<std::vector<double>>();

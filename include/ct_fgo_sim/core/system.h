@@ -66,7 +66,6 @@ struct AppConfig {
     bool use_gnss_factors = true;
     bool use_imu_factors = true;
     double output_query_dt_s = 0.0;
-    bool use_direct_spline_state = false;
     bool use_explicit_init_state = false;
     Vector3d init_pos_blh = Vector3d::Zero();
     Vector3d init_vel_ned = Vector3d::Zero();
