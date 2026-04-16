@@ -33,9 +33,14 @@ find_package(Sophus REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(glog REQUIRED)
+option(CT_FGO_SIM_ENABLE_GTSAM "Enable GTSAM backend shim for phased migration" OFF)
+if (CT_FGO_SIM_ENABLE_GTSAM)
+    find_package(GTSAM REQUIRED)
+endif ()
 
 add_library(ct_fgo_sim
     src/core/app_yaml_io.cpp
+    src/core/factor_graph_backend.cpp
     src/core/factor_graph_session.cpp
     src/core/marginalization.cpp
     src/core/spline_helpers.cpp
@@ -57,6 +62,10 @@ target_link_libraries(ct_fgo_sim
         glog::glog
         Eigen3::Eigen
 )
+if (CT_FGO_SIM_ENABLE_GTSAM)
+    target_compile_definitions(ct_fgo_sim PUBLIC CT_FGO_SIM_HAS_GTSAM=1)
+    target_link_libraries(ct_fgo_sim PUBLIC gtsam)
+endif ()
 
 add_executable(ct_fgo_sim_main
     apps/ct_fgo_sim_main.cpp

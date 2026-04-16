@@ -1,0 +1,40 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="D:\Code\CT_FGO_SIM_sliding-window\src\core\app_yaml_io.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Code\CT_FGO_SIM_sliding-window\src\core\factor_graph_backend.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Code\CT_FGO_SIM_sliding-window\src\core\factor_graph_session.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Code\CT_FGO_SIM_sliding-window\src\core\marginalization.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Code\CT_FGO_SIM_sliding-window\src\core\spline_helpers.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Code\CT_FGO_SIM_sliding-window\src\core\system.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Code\CT_FGO_SIM_sliding-window\src\navigation\interval_propagation.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Code\CT_FGO_SIM_sliding-window\src\navigation\mechanization.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="D:\Code\CT_FGO_SIM_sliding-window\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Natvis Include="D:\vcpkg\installed\x64-windows\share\boost-1.90.0\assert\boost_assert.natvis" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{CAA89855-8A68-3D8D-B357-F658355CCBD0}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

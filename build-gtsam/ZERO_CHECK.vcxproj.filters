@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\Code\CT_FGO_SIM_sliding-window\build-gtsam\CMakeFiles\a817bc0246b728dd79bcf5658b0318a7\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{C335D746-B576-3939-A239-2DF7F492367B}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,10 @@
+^D:\CODE\CT_FGO_SIM_SLIDING-WINDOW\BUILD-GTSAM\CMAKEFILES\A817BC0246B728DD79BCF5658B0318A7\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/Code/CT_FGO_SIM_sliding-window -BD:/Code/CT_FGO_SIM_sliding-window/build-gtsam --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/Code/CT_FGO_SIM_sliding-window/build-gtsam/CT_FGO_SIM.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
