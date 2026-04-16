@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ct_fgo_sim/core/factor_graph_session.h"
+#include "ct_fgo_sim/core/marginalization_frontier.h"
 #include "ct_fgo_sim/navigation/interval_propagation.h"
 #include "ct_fgo_sim/navigation/mechanization.h"
 #include "ct_fgo_sim/navigation/earth.h"
@@ -54,17 +56,46 @@ struct AppConfig {
     double imu_sigma_gyro_rps = 0.01;
     double gyro_bias_rw_sigma = 1.0e-4;
     double accel_bias_rw_sigma = 1.0e-3;
+    double gyro_scale_rw_sigma = 1.0e-6;
+    double accel_scale_rw_sigma = 1.0e-6;
     double bias_tau_s = 3600.0;
     bool enable_initial_yaw_feedback = false;
     double initial_yaw_feedback_window_s = 20.0;
     double initial_yaw_feedback_min_speed_mps = 0.5;
     int initial_yaw_feedback_min_pairs = 10;
     double initial_yaw_feedback_max_abs_rad = 1.5707963267948966;
+    bool yaw_bias_enable = false;
+    double yaw_bias_prior_sigma_rad = 0.17453292519943295;
+    double yaw_bias_heading_sigma_rad = 0.08726646259971647;
+    double yaw_bias_heading_min_speed_mps = 1.0;
+    double yaw_bias_heading_cauchy_scale_rad = 0.0;
+    double yaw_bias_window_step_limit_rad = 0.03490658503988659;
+    double yaw_bias_max_abs_rad = 0.7853981633974483;
     int imu_stride = 10;
     int outer_iterations = 1;
     int solver_max_iterations = 20;
     bool use_gnss_factors = true;
     bool use_imu_factors = true;
+    /// Fixed-lag sliding window over spline knots (disabled = single full-batch solve).
+    bool sliding_window_enabled = false;
+    /// If true with sliding_window_enabled, run a single causal pass (grow nominal/knots forward in time)
+    /// instead of replaying every window over the full log in one outer iteration.
+    bool sliding_window_causal = false;
+    /// Number of knots in each window (inclusive span uses knots [k_lo, k_hi] with count = sliding_window_knots).
+    int sliding_window_knots = 30;
+    /// Advance the window by this many knots after each solve (marginalization supports 1 reliably).
+    int sliding_window_step_knots = 1;
+    int solver_max_iterations_window = 15;
+    bool sliding_window_marginalization = true;
+    /// If true, log chrono for cache build, each window build, solve, and marginalization.
+    bool sliding_window_log_timing = false;
+    /// If > 0, passed to Ceres `function_tolerance` for windowed solves only.
+    double sliding_window_function_tolerance = 0.0;
+    /// If > 0, passed to Ceres `gradient_tolerance` for windowed solves only.
+    double sliding_window_gradient_tolerance = 0.0;
+    /// Reduce `max_num_iterations` on the next window when the previous solve used few successful steps.
+    bool sliding_window_adaptive_solver_iterations = false;
+    int sliding_window_adaptive_solver_min_iterations = 4;
     double output_query_dt_s = 0.0;
     bool use_explicit_init_state = false;
     Vector3d init_pos_blh = Vector3d::Zero();
@@ -72,6 +103,8 @@ struct AppConfig {
     Vector3d init_att_rpy_rad = Vector3d::Zero();
     Vector3d init_bg_rps = Vector3d::Zero();
     Vector3d init_ba_mps2 = Vector3d::Zero();
+    Vector3d init_sg = Vector3d::Zero();
+    Vector3d init_sa = Vector3d::Zero();
 };
 
 struct ComposedState {
@@ -86,11 +119,15 @@ struct ComposedState {
     Vector3d full_alpha_body = Vector3d::Zero();
     Vector3d full_bg = Vector3d::Zero();
     Vector3d full_ba = Vector3d::Zero();
+    Vector3d full_sg = Vector3d::Zero();
+    Vector3d full_sa = Vector3d::Zero();
     Vector3d delta_theta = Vector3d::Zero();
     Vector3d delta_vel_ned = Vector3d::Zero();
     Vector3d delta_pos_ned = Vector3d::Zero();
     Vector3d delta_bg = Vector3d::Zero();
     Vector3d delta_ba = Vector3d::Zero();
+    Vector3d delta_sg = Vector3d::Zero();
+    Vector3d delta_sa = Vector3d::Zero();
 };
 
 class System {
@@ -107,9 +144,21 @@ private:
     bool InitializeControlPoints();
     bool ResetControlPointsFromNominalTrajectory(bool reset_biases);
     bool BuildAndSolveProblem();
+    bool BuildAndSolveProblemSliding();
+    bool BuildAndSolveProblemSlidingReplayFullSpan();
+    bool BuildAndSolveProblemSlidingCausal();
+    bool RunSlidingWindowPass(
+        int k_lo,
+        int W,
+        double* acc_build_solve_seconds,
+        double* acc_marg_seconds,
+        double* acc_reprop_seconds,
+        bool has_future_knot);
+    FactorGraphSession MakeFactorGraphSession();
     bool SaveOutputs() const;
     bool ApplyInitialYawFeedbackFromGnss();
     bool InjectCurrentErrorStateIntoNominalTrajectory();
+    bool RepropagateNominalToLatestImuAfterOptimization(int reprop_knot_lo);
     std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
     std::optional<Vector3d> EvaluateNominalAccelAtTime(double time) const;
     std::optional<Vector3d> EvaluateNodeValueAtTime(
@@ -130,6 +179,8 @@ private:
     AlignedVec3Array delta_pos_nodes_;
     AlignedVec3Array delta_bg_nodes_;
     AlignedVec3Array delta_ba_nodes_;
+    AlignedVec3Array delta_sg_nodes_;
+    AlignedVec3Array delta_sa_nodes_;
     Vector3d lever_arm_ = Vector3d::Zero();
     Eigen::Quaterniond initial_q_body_imu_ = Eigen::Quaterniond::Identity();
     Eigen::Quaterniond q_body_imu_ = Eigen::Quaterniond::Identity();
@@ -139,8 +190,24 @@ private:
     StaticAlignmentResult initial_alignment_;
     NominalNavStates nominal_nav_;
     IntervalPropagationCache interval_cache_;
+    MarginalizationFrontier marginalization_frontier_{};
     bool initial_yaw_feedback_applied_ = false;
     double initial_yaw_feedback_total_rad_ = 0.0;
+    double yaw_bias_rad_ = 0.0;
+    double yaw_bias_feedback_total_rad_ = 0.0;
+    size_t post_opt_reprop_trigger_count_ = 0;
+    size_t post_opt_reprop_incremental_count_ = 0;
+    size_t post_opt_reprop_full_rebuild_fallback_count_ = 0;
+    double post_opt_reprop_total_covered_s_ = 0.0;
+    double post_opt_reprop_last_covered_s_ = 0.0;
+    double post_opt_reprop_last_tail_error_s_ = 0.0;
+    double post_opt_reprop_max_tail_error_s_ = 0.0;
+    size_t sliding_marginalization_trigger_count_ = 0;
+    size_t sliding_marginalization_removed_knots_total_ = 0;
+    double sliding_window_total_build_solve_s_ = 0.0;
+    double sliding_window_total_marg_s_ = 0.0;
+    double sliding_window_total_reprop_s_ = 0.0;
+    int sliding_window_current_max_iterations_ = 0;
 };
 
 }  // namespace ct_fgo_sim

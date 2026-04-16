@@ -4,6 +4,7 @@
 #include "ct_fgo_sim/navigation/nav_math.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 
@@ -138,11 +139,15 @@ Quaterniond InterpolateQuaternion(
 MechImuSample BiasCompensate(
     const ImuMeasurement& meas,
     const Vector3d& gyro_bias_rps,
-    const Vector3d& accel_bias_mps2) {
+    const Vector3d& accel_bias_mps2,
+    const Vector3d& gyro_scale,
+    const Vector3d& accel_scale) {
     MechImuSample corrected;
     corrected.dt = meas.dt;
-    corrected.dtheta = meas.dtheta - gyro_bias_rps * meas.dt;
-    corrected.dvel = meas.dvel - accel_bias_mps2 * meas.dt;
+    const Vector3d dtheta_unbiased = meas.dtheta - gyro_bias_rps * meas.dt;
+    const Vector3d dvel_unbiased = meas.dvel - accel_bias_mps2 * meas.dt;
+    corrected.dtheta = dtheta_unbiased.cwiseQuotient((Vector3d::Ones() + gyro_scale).cwiseMax(1.0e-8));
+    corrected.dvel = dvel_unbiased.cwiseQuotient((Vector3d::Ones() + accel_scale).cwiseMax(1.0e-8));
     return corrected;
 }
 
@@ -161,6 +166,9 @@ void KfVelUpdate(
              -pvapre.vel_ned.x() / (rmrn.x() + pvapre.blh.z()),
              -pvapre.vel_ned.y() * std::tan(pvapre.blh.x()) / (rmrn.y() + pvapre.blh.z());
     const double gravity = Earth::Gravity(pvapre.blh);
+    assert(std::isfinite(gravity));
+    assert(wie_n.allFinite());
+    assert(wen_n.allFinite());
 
     const Vector3d temp1 = imucur.dtheta.cross(imucur.dvel) / 2.0;
     const Vector3d temp2 = imupre.dtheta.cross(imucur.dvel) / 12.0;
@@ -188,10 +196,13 @@ void KfVelUpdate(
     wen_n << midvel.y() / (rmrn_mid.y() + midpos.z()),
              -midvel.x() / (rmrn_mid.x() + midpos.z()),
              -midvel.y() * std::tan(midpos.x()) / (rmrn_mid.y() + midpos.z());
+    assert(wie_n.allFinite());
+    assert(wen_n.allFinite());
 
     cnn = I33 - SkewSymmetric3((wie_n + wen_n) * imucur.dt / 2.0);
     d_vfn = cnn * pvapre.q_nb.toRotationMatrix() * d_vfb;
     gl << 0.0, 0.0, Earth::Gravity(midpos);
+    assert(std::isfinite(gl.z()));
     d_vgn = (gl - (2.0 * wie_n + wen_n).cross(midvel)) * imucur.dt;
 
     pvacur.vel_ned = pvapre.vel_ned + d_vfn + d_vgn;
@@ -226,6 +237,8 @@ void KfPosUpdate(
     wen_n << midvel.y() / (rmrn.y() + midpos.z()),
              -midvel.x() / (rmrn.x() + midpos.z()),
              -midvel.y() * std::tan(midpos.x()) / (rmrn.y() + midpos.z());
+    assert(wie_n.allFinite());
+    assert(wen_n.allFinite());
 
     const Quaterniond qnn = RotvecToQuaternion((wie_n + wen_n) * imucur.dt);
     const Quaterniond qee = RotvecToQuaternion(Vector3d(0.0, 0.0, -kWgs84Wie * imucur.dt));
@@ -260,6 +273,8 @@ void KfAttUpdate(
     wen_n << midvel.y() / (rmrn_att.y() + midpos.z()),
              -midvel.x() / (rmrn_att.x() + midpos.z()),
              -midvel.y() * std::tan(midpos.x()) / (rmrn_att.y() + midpos.z());
+    assert(wie_n.allFinite());
+    assert(wen_n.allFinite());
 
     const Quaterniond qnn = RotvecToQuaternion(-(wie_n + wen_n) * imucur.dt);
     const Quaterniond qbb = RotvecToQuaternion(imucur.dtheta + imupre.dtheta.cross(imucur.dtheta) / 12.0);
@@ -324,7 +339,9 @@ NominalNavStates PropagateNominalTrajectory(
     const StaticAlignmentResult& alignment,
     const std::vector<double>& bias_times,
     const AlignedVec3Array& gyro_biases,
-    const AlignedVec3Array& accel_biases) {
+    const AlignedVec3Array& accel_biases,
+    const AlignedVec3Array& gyro_scales,
+    const AlignedVec3Array& accel_scales) {
     NominalNavStates nav;
     if (imu.empty()) {
         return nav;
@@ -344,7 +361,9 @@ NominalNavStates PropagateNominalTrajectory(
     for (size_t i = 0; i <= anchor_index; ++i) {
         const Vector3d bg = InterpolateBias(imu[i].time, bias_times, gyro_biases, alignment.bg0);
         const Vector3d ba = InterpolateBias(imu[i].time, bias_times, accel_biases, alignment.ba0);
-        nav.push_back({imu[i].time, pvacur.blh, pvacur.vel_ned, pvacur.q_nb, bg, ba});
+        const Vector3d sg = InterpolateBias(imu[i].time, bias_times, gyro_scales, Vector3d::Zero());
+        const Vector3d sa = InterpolateBias(imu[i].time, bias_times, accel_scales, Vector3d::Zero());
+        nav.push_back({imu[i].time, pvacur.blh, pvacur.vel_ned, pvacur.q_nb, bg, ba, sg, sa});
     }
 
     for (size_t i = anchor_index + 1; i < imu.size(); ++i) {
@@ -357,18 +376,140 @@ NominalNavStates PropagateNominalTrajectory(
         const Vector3d ba_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_biases, alignment.ba0);
         const Vector3d bg_cur = InterpolateBias(meas.time, bias_times, gyro_biases, alignment.bg0);
         const Vector3d ba_cur = InterpolateBias(meas.time, bias_times, accel_biases, alignment.ba0);
-        const MechImuSample imupre = BiasCompensate(imu[i - 1], bg_pre, ba_pre);
-        const MechImuSample imucur = BiasCompensate(meas, bg_cur, ba_cur);
+        const Vector3d sg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_scales, Vector3d::Zero());
+        const Vector3d sa_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_scales, Vector3d::Zero());
+        const Vector3d sg_cur = InterpolateBias(meas.time, bias_times, gyro_scales, Vector3d::Zero());
+        const Vector3d sa_cur = InterpolateBias(meas.time, bias_times, accel_scales, Vector3d::Zero());
+        const MechImuSample imupre = BiasCompensate(imu[i - 1], bg_pre, ba_pre, sg_pre, sa_pre);
+        const MechImuSample imucur = BiasCompensate(meas, bg_cur, ba_cur, sg_cur, sa_cur);
 
         PvaState pvapre = pvacur;
         KfVelUpdate(pvapre, pvacur, imupre, imucur);
         KfPosUpdate(pvapre, pvacur, imucur);
         KfAttUpdate(pvapre, pvacur, imupre, imucur);
 
-        nav.push_back({meas.time, pvacur.blh, pvacur.vel_ned, pvacur.q_nb, bg_cur, ba_cur});
+        nav.push_back({meas.time, pvacur.blh, pvacur.vel_ned, pvacur.q_nb, bg_cur, ba_cur, sg_cur, sa_cur});
     }
 
     return nav;
+}
+
+void ExtendNominalNavToImuIndex(
+    NominalNavStates& nav,
+    const ImuMeasurementArray& imu,
+    const Vector3d& initial_blh,
+    const StaticAlignmentResult& alignment,
+    const std::vector<double>& bias_times,
+    const AlignedVec3Array& gyro_biases,
+    const AlignedVec3Array& accel_biases,
+    const AlignedVec3Array& gyro_scales,
+    const AlignedVec3Array& accel_scales,
+    size_t target_last_imu_index) {
+    if (imu.empty()) {
+        return;
+    }
+    const size_t target = std::min(target_last_imu_index, imu.size() - 1);
+
+    size_t anchor_index = 0;
+    while (anchor_index + 1 < imu.size() && imu[anchor_index].time < alignment.reference_time) {
+        ++anchor_index;
+    }
+
+    if (nav.empty()) {
+        nav.reserve(std::min(target + 1, imu.size()));
+        Vector3d blh = initial_blh;
+        PvaState pvacur;
+        pvacur.blh = blh;
+        pvacur.vel_ned = alignment.vel0_ned;
+        pvacur.q_nb = alignment.q_nb;
+
+        for (size_t i = 0; i <= std::min(anchor_index, target); ++i) {
+            const Vector3d bg = InterpolateBias(imu[i].time, bias_times, gyro_biases, alignment.bg0);
+            const Vector3d ba = InterpolateBias(imu[i].time, bias_times, accel_biases, alignment.ba0);
+            const Vector3d sg = InterpolateBias(imu[i].time, bias_times, gyro_scales, Vector3d::Zero());
+            const Vector3d sa = InterpolateBias(imu[i].time, bias_times, accel_scales, Vector3d::Zero());
+            nav.push_back({imu[i].time, pvacur.blh, pvacur.vel_ned, pvacur.q_nb, bg, ba, sg, sa});
+        }
+        for (size_t i = anchor_index + 1; i <= target; ++i) {
+            const auto& meas = imu[i];
+            if (meas.dt <= 0.0) {
+                continue;
+            }
+
+            const Vector3d bg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_biases, alignment.bg0);
+            const Vector3d ba_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_biases, alignment.ba0);
+            const Vector3d bg_cur = InterpolateBias(meas.time, bias_times, gyro_biases, alignment.bg0);
+            const Vector3d ba_cur = InterpolateBias(meas.time, bias_times, accel_biases, alignment.ba0);
+            const Vector3d sg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_scales, Vector3d::Zero());
+            const Vector3d sa_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_scales, Vector3d::Zero());
+            const Vector3d sg_cur = InterpolateBias(meas.time, bias_times, gyro_scales, Vector3d::Zero());
+            const Vector3d sa_cur = InterpolateBias(meas.time, bias_times, accel_scales, Vector3d::Zero());
+            const MechImuSample imupre = BiasCompensate(imu[i - 1], bg_pre, ba_pre, sg_pre, sa_pre);
+            const MechImuSample imucur = BiasCompensate(meas, bg_cur, ba_cur, sg_cur, sa_cur);
+
+            PvaState pvapre = pvacur;
+            KfVelUpdate(pvapre, pvacur, imupre, imucur);
+            KfPosUpdate(pvapre, pvacur, imucur);
+            KfAttUpdate(pvapre, pvacur, imupre, imucur);
+
+            nav.push_back({meas.time, pvacur.blh, pvacur.vel_ned, pvacur.q_nb, bg_cur, ba_cur, sg_cur, sa_cur});
+        }
+        return;
+    }
+
+    if (nav.size() > target + 1) {
+        nav.resize(target + 1);
+        return;
+    }
+    if (nav.size() == target + 1) {
+        return;
+    }
+    if (nav.size() < anchor_index + 1) {
+        nav.clear();
+        ExtendNominalNavToImuIndex(
+            nav,
+            imu,
+            initial_blh,
+            alignment,
+            bias_times,
+            gyro_biases,
+            accel_biases,
+            gyro_scales,
+            accel_scales,
+            target);
+        return;
+    }
+
+    PvaState pvacur;
+    pvacur.blh = nav.back().blh;
+    pvacur.vel_ned = nav.back().vel_ned;
+    pvacur.q_nb = nav.back().q_nb;
+
+    const size_t i_start = nav.size();
+    for (size_t i = i_start; i <= target; ++i) {
+        const auto& meas = imu[i];
+        if (meas.dt <= 0.0) {
+            continue;
+        }
+
+        const Vector3d bg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_biases, alignment.bg0);
+        const Vector3d ba_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_biases, alignment.ba0);
+        const Vector3d bg_cur = InterpolateBias(meas.time, bias_times, gyro_biases, alignment.bg0);
+        const Vector3d ba_cur = InterpolateBias(meas.time, bias_times, accel_biases, alignment.ba0);
+        const Vector3d sg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_scales, Vector3d::Zero());
+        const Vector3d sa_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_scales, Vector3d::Zero());
+        const Vector3d sg_cur = InterpolateBias(meas.time, bias_times, gyro_scales, Vector3d::Zero());
+        const Vector3d sa_cur = InterpolateBias(meas.time, bias_times, accel_scales, Vector3d::Zero());
+        const MechImuSample imupre = BiasCompensate(imu[i - 1], bg_pre, ba_pre, sg_pre, sa_pre);
+        const MechImuSample imucur = BiasCompensate(meas, bg_cur, ba_cur, sg_cur, sa_cur);
+
+        PvaState pvapre = pvacur;
+        KfVelUpdate(pvapre, pvacur, imupre, imucur);
+        KfPosUpdate(pvapre, pvacur, imucur);
+        KfAttUpdate(pvapre, pvacur, imupre, imucur);
+
+        nav.push_back({meas.time, pvacur.blh, pvacur.vel_ned, pvacur.q_nb, bg_cur, ba_cur, sg_cur, sa_cur});
+    }
 }
 
 std::optional<NominalNavState> EvaluateNominalState(
@@ -416,6 +557,8 @@ std::optional<NominalNavState> EvaluateNominalState(
     out.q_nb = InterpolateQuaternion(time, states, i, j);
     out.bg = states[i].bg * (1.0 - u) + states[j].bg * u;
     out.ba = states[i].ba * (1.0 - u) + states[j].ba * u;
+    out.sg = states[i].sg * (1.0 - u) + states[j].sg * u;
+    out.sa = states[i].sa * (1.0 - u) + states[j].sa * u;
     return out;
 }
 

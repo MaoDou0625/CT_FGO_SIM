@@ -37,6 +37,7 @@ find_package(glog REQUIRED)
 add_library(ct_fgo_sim
     src/core/app_yaml_io.cpp
     src/core/factor_graph_session.cpp
+    src/core/marginalization.cpp
     src/core/spline_helpers.cpp
     src/core/system.cpp
     src/navigation/interval_propagation.cpp

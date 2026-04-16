@@ -84,6 +84,12 @@ bool LoadAppConfigYaml(
     if (cfg["accel_bias_rw_sigma"]) {
         config.accel_bias_rw_sigma = cfg["accel_bias_rw_sigma"].as<double>();
     }
+    if (cfg["gyro_scale_rw_sigma"]) {
+        config.gyro_scale_rw_sigma = cfg["gyro_scale_rw_sigma"].as<double>();
+    }
+    if (cfg["accel_scale_rw_sigma"]) {
+        config.accel_scale_rw_sigma = cfg["accel_scale_rw_sigma"].as<double>();
+    }
     if (cfg["bias_tau_s"]) {
         config.bias_tau_s = cfg["bias_tau_s"].as<double>();
     }
@@ -105,6 +111,31 @@ bool LoadAppConfigYaml(
             config.initial_yaw_feedback_max_abs_rad = yaw_feedback["max_abs_deg"].as<double>() * kDegToRad;
         }
     }
+    if (cfg["yaw_bias"]) {
+        const YAML::Node yaw_bias = cfg["yaw_bias"];
+        if (yaw_bias["enable"]) {
+            config.yaw_bias_enable = yaw_bias["enable"].as<bool>();
+        }
+        if (yaw_bias["prior_sigma_deg"]) {
+            config.yaw_bias_prior_sigma_rad = yaw_bias["prior_sigma_deg"].as<double>() * kDegToRad;
+        }
+        if (yaw_bias["heading_sigma_deg"]) {
+            config.yaw_bias_heading_sigma_rad = yaw_bias["heading_sigma_deg"].as<double>() * kDegToRad;
+        }
+        if (yaw_bias["heading_min_speed_mps"]) {
+            config.yaw_bias_heading_min_speed_mps = yaw_bias["heading_min_speed_mps"].as<double>();
+        }
+        if (yaw_bias["heading_cauchy_scale_deg"]) {
+            config.yaw_bias_heading_cauchy_scale_rad =
+                yaw_bias["heading_cauchy_scale_deg"].as<double>() * kDegToRad;
+        }
+        if (yaw_bias["window_step_limit_deg"]) {
+            config.yaw_bias_window_step_limit_rad = yaw_bias["window_step_limit_deg"].as<double>() * kDegToRad;
+        }
+        if (yaw_bias["max_abs_deg"]) {
+            config.yaw_bias_max_abs_rad = yaw_bias["max_abs_deg"].as<double>() * kDegToRad;
+        }
+    }
     if (cfg["imu_stride"]) {
         config.imu_stride = std::max(1, cfg["imu_stride"].as<int>());
     }
@@ -119,6 +150,43 @@ bool LoadAppConfigYaml(
     }
     if (cfg["use_imu_factors"]) {
         config.use_imu_factors = cfg["use_imu_factors"].as<bool>();
+    }
+    if (cfg["sliding_window"]) {
+        const YAML::Node sw = cfg["sliding_window"];
+        if (sw["enable"]) {
+            config.sliding_window_enabled = sw["enable"].as<bool>();
+        }
+        if (sw["causal"]) {
+            config.sliding_window_causal = sw["causal"].as<bool>();
+        }
+        if (sw["knots"]) {
+            config.sliding_window_knots = std::max(3, sw["knots"].as<int>());
+        }
+        if (sw["step_knots"]) {
+            config.sliding_window_step_knots = std::max(1, sw["step_knots"].as<int>());
+        }
+        if (sw["solver_max_iterations"]) {
+            config.solver_max_iterations_window = std::max(1, sw["solver_max_iterations"].as<int>());
+        }
+        if (sw["marginalization"]) {
+            config.sliding_window_marginalization = sw["marginalization"].as<bool>();
+        }
+        if (sw["log_timing"]) {
+            config.sliding_window_log_timing = sw["log_timing"].as<bool>();
+        }
+        if (sw["function_tolerance"]) {
+            config.sliding_window_function_tolerance = sw["function_tolerance"].as<double>();
+        }
+        if (sw["gradient_tolerance"]) {
+            config.sliding_window_gradient_tolerance = sw["gradient_tolerance"].as<double>();
+        }
+        if (sw["adaptive_solver_iterations"]) {
+            config.sliding_window_adaptive_solver_iterations = sw["adaptive_solver_iterations"].as<bool>();
+        }
+        if (sw["adaptive_solver_min_iterations"]) {
+            config.sliding_window_adaptive_solver_min_iterations =
+                std::max(1, sw["adaptive_solver_min_iterations"].as<int>());
+        }
     }
     if (cfg["output_query_dt_s"]) {
         config.output_query_dt_s = cfg["output_query_dt_s"].as<double>();
@@ -145,6 +213,18 @@ bool LoadAppConfigYaml(
         const auto initba = cfg["initaccbias"].as<std::vector<double>>();
         if (initba.size() == 3) {
             config.init_ba_mps2 = Vector3d(initba[0], initba[1], initba[2]) * 1.0e-5;
+        }
+    }
+    if (cfg["initgyrscale"]) {
+        const auto initsg = cfg["initgyrscale"].as<std::vector<double>>();
+        if (initsg.size() == 3) {
+            config.init_sg = Vector3d(initsg[0], initsg[1], initsg[2]);
+        }
+    }
+    if (cfg["initaccscale"]) {
+        const auto initsa = cfg["initaccscale"].as<std::vector<double>>();
+        if (initsa.size() == 3) {
+            config.init_sa = Vector3d(initsa[0], initsa[1], initsa[2]);
         }
     }
     if (cfg["body_frame"]) {

@@ -26,6 +26,8 @@ struct NominalNavState {
     Quaterniond q_nb = Quaterniond::Identity();
     Vector3d bg = Vector3d::Zero();
     Vector3d ba = Vector3d::Zero();
+    Vector3d sg = Vector3d::Zero();
+    Vector3d sa = Vector3d::Zero();
 };
 
 using NominalNavStates = std::vector<NominalNavState, Eigen::aligned_allocator<NominalNavState>>;
@@ -41,7 +43,23 @@ NominalNavStates PropagateNominalTrajectory(
     const StaticAlignmentResult& alignment,
     const std::vector<double>& bias_times,
     const AlignedVec3Array& gyro_biases,
-    const AlignedVec3Array& accel_biases);
+    const AlignedVec3Array& accel_biases,
+    const AlignedVec3Array& gyro_scales,
+    const AlignedVec3Array& accel_scales);
+
+/// Grows `nav` so it covers IMU indices `0..target_last_imu_index` (inclusive), matching
+/// `PropagateNominalTrajectory` segment-for-segment. Used for causal online nominal extension.
+void ExtendNominalNavToImuIndex(
+    NominalNavStates& nav,
+    const ImuMeasurementArray& imu,
+    const Vector3d& initial_blh,
+    const StaticAlignmentResult& alignment,
+    const std::vector<double>& bias_times,
+    const AlignedVec3Array& gyro_biases,
+    const AlignedVec3Array& accel_biases,
+    const AlignedVec3Array& gyro_scales,
+    const AlignedVec3Array& accel_scales,
+    size_t target_last_imu_index);
 
 std::optional<NominalNavState> EvaluateNominalState(
     const NominalNavStates& states,

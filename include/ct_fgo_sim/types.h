@@ -10,6 +10,12 @@ using Eigen::Matrix3d;
 using Eigen::Quaterniond;
 using Eigen::Vector3d;
 using AlignedVec3Array = std::vector<Vector3d, Eigen::aligned_allocator<Vector3d>>;
+constexpr int kErrorStateDim = 21;
+constexpr int kErrorStateBlockCount = 7;
+using VectorErrorState = Eigen::Matrix<double, kErrorStateDim, 1>;
+using MatrixErrorState = Eigen::Matrix<double, kErrorStateDim, kErrorStateDim>;
+using MatrixErrorState2 = Eigen::Matrix<double, 2 * kErrorStateDim, 2 * kErrorStateDim>;
+using VectorErrorState2 = Eigen::Matrix<double, 2 * kErrorStateDim, 1>;
 
 struct GnssMeasurement {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW

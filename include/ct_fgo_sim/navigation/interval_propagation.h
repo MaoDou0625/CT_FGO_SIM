@@ -30,9 +30,9 @@ struct KnotIntervalPropagation {
     size_t begin_imu_index = 0;
     size_t end_imu_index = 0;
     bool valid = false;
-    Eigen::Matrix<double, 15, 15> phi = Eigen::Matrix<double, 15, 15>::Identity();
-    Eigen::Matrix<double, 15, 15> q = Eigen::Matrix<double, 15, 15>::Zero();
-    Eigen::Matrix<double, 15, 15> sqrt_info = Eigen::Matrix<double, 15, 15>::Identity();
+    MatrixErrorState phi = MatrixErrorState::Identity();
+    MatrixErrorState q = MatrixErrorState::Zero();
+    MatrixErrorState sqrt_info = MatrixErrorState::Identity();
 };
 
 using KnotIntervalPropagations = std::vector<KnotIntervalPropagation>;
@@ -51,6 +51,23 @@ void BuildIntervalPropagationCache(
     double sigma_accel_mps2,
     double sigma_bg_std,
     double sigma_ba_std,
+    double sigma_sg_std,
+    double sigma_sa_std,
+    double bias_tau_s,
+    IntervalPropagationCache& cache);
+
+/// Incrementally extends `cache` for appended nominal states/control points.
+/// Falls back to full rebuild when input/cache prefixes are inconsistent.
+void AppendIntervalPropagationCache(
+    const ImuMeasurementArray& imu,
+    const NominalNavStates& nominal_states,
+    const spline::ControlPointArray& control_points,
+    double sigma_gyro_rps,
+    double sigma_accel_mps2,
+    double sigma_bg_std,
+    double sigma_ba_std,
+    double sigma_sg_std,
+    double sigma_sa_std,
     double bias_tau_s,
     IntervalPropagationCache& cache);
 

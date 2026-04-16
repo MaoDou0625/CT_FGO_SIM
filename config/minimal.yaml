@@ -36,3 +36,12 @@ accel_bias_rw_sigma: 1.0e-3
 bias_tau_s: 3600.0
 imu_stride: 10
 solver_max_iterations: 15
+
+# Optional: fixed-lag error-state window (default off = full batch).
+# sliding_window:
+#   enable: false
+#   knots: 30
+#   step_knots: 1
+#   solver_max_iterations: 12
+#   marginalization: true
+#   log_timing: false

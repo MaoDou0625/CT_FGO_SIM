@@ -1,12 +1,15 @@
 #include "ct_fgo_sim/core/factor_graph_session.h"
 
+#include "ct_fgo_sim/core/marginalization_frontier.h"
 #include "ct_fgo_sim/core/spline_helpers.h"
 #include "ct_fgo_sim/core/system.h"
 #include "ct_fgo_sim/factors/error_state_gnss_factor.h"
 #include "ct_fgo_sim/factors/error_state_interval_factor.h"
 #include "ct_fgo_sim/factors/error_state_nhc_factor.h"
+#include "ct_fgo_sim/factors/error_state_yaw_bias_factor.h"
 #include "ct_fgo_sim/factors/quaternion_prior_factor.h"
 #include "ct_fgo_sim/navigation/earth.h"
+#include "ct_fgo_sim/navigation/mechanization.h"
 
 #include <ceres/ceres.h>
 #include <glog/logging.h>
@@ -14,16 +17,33 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <thread>
 
 namespace ct_fgo_sim {
+
+namespace {
+
+struct YawBiasPriorFactor {
+    explicit YawBiasPriorFactor(double sigma_rad)
+        : inv_sigma_(1.0 / std::max(1.0e-6, sigma_rad)) {}
+    template <typename T>
+    bool operator()(const T* const yaw_bias, T* residuals) const {
+        residuals[0] = T(inv_sigma_) * yaw_bias[0];
+        return true;
+    }
+    double inv_sigma_ = 1.0;
+};
+
+}  // namespace
 
 bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
     if (!session.config || !session.origin_blh || !session.gnss || !session.imu || !session.nhc ||
         !session.control_points || !session.delta_theta_nodes || !session.delta_vel_nodes ||
         !session.delta_pos_nodes || !session.delta_bg_nodes || !session.delta_ba_nodes ||
+        !session.delta_sg_nodes || !session.delta_sa_nodes ||
         !session.lever_arm || !session.time_offset_s || !session.q_body_imu || !session.nominal_nav ||
-        !session.interval_cache) {
+        !session.interval_cache || (session.config && session.config->yaw_bias_enable && !session.yaw_bias_rad)) {
         LOG(ERROR) << "BuildAndSolveFactorGraph: incomplete session";
         return false;
     }
@@ -31,7 +51,6 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
     AppConfig& config_ = *session.config;
     Vector3d& origin_blh_ = *session.origin_blh;
     GnssMeasurementArray& gnss_ = *session.gnss;
-    ImuMeasurementArray& imu_ = *session.imu;
     NhcMeasurementArray& nhc_ = *session.nhc;
     spline::ControlPointArray& control_points_ = *session.control_points;
     AlignedVec3Array& delta_theta_nodes_ = *session.delta_theta_nodes;
@@ -39,9 +58,12 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
     AlignedVec3Array& delta_pos_nodes_ = *session.delta_pos_nodes;
     AlignedVec3Array& delta_bg_nodes_ = *session.delta_bg_nodes;
     AlignedVec3Array& delta_ba_nodes_ = *session.delta_ba_nodes;
+    AlignedVec3Array& delta_sg_nodes_ = *session.delta_sg_nodes;
+    AlignedVec3Array& delta_sa_nodes_ = *session.delta_sa_nodes;
     Vector3d& lever_arm_ = *session.lever_arm;
     double& time_offset_s_ = *session.time_offset_s;
     Eigen::Quaterniond& q_body_imu_ = *session.q_body_imu;
+    double* yaw_bias_rad = session.yaw_bias_rad;
     NominalNavStates& nominal_nav_ = *session.nominal_nav;
     IntervalPropagationCache& interval_cache_ = *session.interval_cache;
 
@@ -50,32 +72,68 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
         return false;
     }
 
+    const bool windowed =
+        session.window_knot_lo >= 0 && session.window_knot_hi >= session.window_knot_lo;
+    const int n_knots = static_cast<int>(control_points_.size());
+    int k_lo = 0;
+    int k_hi = n_knots - 1;
+    if (windowed) {
+        k_lo = std::clamp(session.window_knot_lo, 0, n_knots - 1);
+        k_hi = std::clamp(session.window_knot_hi, k_lo, n_knots - 1);
+        if (k_hi - k_lo < 1) {
+            LOG(ERROR) << "Sliding window must span at least two knots";
+            return false;
+        }
+    }
+
     ceres::Problem problem;
-    for (auto& delta_theta : delta_theta_nodes_) {
-        problem.AddParameterBlock(delta_theta.data(), 3);
-    }
-    for (auto& delta_vel : delta_vel_nodes_) {
-        problem.AddParameterBlock(delta_vel.data(), 3);
-    }
-    for (auto& delta_pos : delta_pos_nodes_) {
-        problem.AddParameterBlock(delta_pos.data(), 3);
-    }
-    for (auto& delta_bg : delta_bg_nodes_) {
-        problem.AddParameterBlock(delta_bg.data(), 3);
-    }
-    for (auto& delta_ba : delta_ba_nodes_) {
-        problem.AddParameterBlock(delta_ba.data(), 3);
+    for (int k = (windowed ? k_lo : 0); k <= (windowed ? k_hi : n_knots - 1); ++k) {
+        problem.AddParameterBlock(delta_theta_nodes_[static_cast<size_t>(k)].data(), 3);
+        problem.AddParameterBlock(delta_vel_nodes_[static_cast<size_t>(k)].data(), 3);
+        problem.AddParameterBlock(delta_pos_nodes_[static_cast<size_t>(k)].data(), 3);
+        problem.AddParameterBlock(delta_bg_nodes_[static_cast<size_t>(k)].data(), 3);
+        problem.AddParameterBlock(delta_ba_nodes_[static_cast<size_t>(k)].data(), 3);
+        problem.AddParameterBlock(delta_sg_nodes_[static_cast<size_t>(k)].data(), 3);
+        problem.AddParameterBlock(delta_sa_nodes_[static_cast<size_t>(k)].data(), 3);
     }
     problem.AddParameterBlock(&time_offset_s_, 1);
+    if (config_.yaw_bias_enable && yaw_bias_rad) {
+        problem.AddParameterBlock(yaw_bias_rad, 1);
+    }
     problem.AddParameterBlock(q_body_imu_.coeffs().data(), 4, new ceres::EigenQuaternionManifold);
-    problem.SetParameterBlockConstant(delta_theta_nodes_.front().data());
-    problem.SetParameterBlockConstant(delta_vel_nodes_.front().data());
-    problem.SetParameterBlockConstant(delta_pos_nodes_.front().data());
-    problem.SetParameterBlockConstant(delta_bg_nodes_.front().data());
-    problem.SetParameterBlockConstant(delta_ba_nodes_.front().data());
+
+    if (!windowed || k_lo == 0) {
+        problem.SetParameterBlockConstant(delta_theta_nodes_.front().data());
+        problem.SetParameterBlockConstant(delta_vel_nodes_.front().data());
+        problem.SetParameterBlockConstant(delta_pos_nodes_.front().data());
+        problem.SetParameterBlockConstant(delta_bg_nodes_.front().data());
+        problem.SetParameterBlockConstant(delta_ba_nodes_.front().data());
+        problem.SetParameterBlockConstant(delta_sg_nodes_.front().data());
+        problem.SetParameterBlockConstant(delta_sa_nodes_.front().data());
+    }
     problem.SetParameterBlockConstant(&time_offset_s_);
     if (!(config_.body_frame.enable_nhc && config_.body_frame.estimate_q_body_imu)) {
         problem.SetParameterBlockConstant(q_body_imu_.coeffs().data());
+    }
+    if (config_.yaw_bias_enable && yaw_bias_rad) {
+        double lb = -std::numeric_limits<double>::infinity();
+        double ub = std::numeric_limits<double>::infinity();
+        if (config_.yaw_bias_max_abs_rad > 0.0) {
+            lb = -config_.yaw_bias_max_abs_rad;
+            ub = config_.yaw_bias_max_abs_rad;
+        }
+        if (session.has_yaw_bias_step_limit && session.yaw_bias_step_limit_rad > 0.0) {
+            const double d = session.yaw_bias_step_limit_rad;
+            lb = std::max(lb, session.yaw_bias_center_rad - d);
+            ub = std::min(ub, session.yaw_bias_center_rad + d);
+        }
+        if (lb > ub) {
+            const double mid = 0.5 * (lb + ub);
+            lb = mid;
+            ub = mid;
+        }
+        problem.SetParameterLowerBound(yaw_bias_rad, 0, lb);
+        problem.SetParameterUpperBound(yaw_bias_rad, 0, ub);
     }
 
     problem.AddResidualBlock(
@@ -84,13 +142,79 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
             config_.body_frame.q_body_imu_prior_sigma_rad),
         nullptr,
         q_body_imu_.coeffs().data());
+    if (config_.yaw_bias_enable && yaw_bias_rad) {
+        problem.AddResidualBlock(
+            new ceres::AutoDiffCostFunction<YawBiasPriorFactor, 1, 1>(
+                new YawBiasPriorFactor(config_.yaw_bias_prior_sigma_rad)),
+            nullptr,
+            yaw_bias_rad);
+    }
+
+    if (session.marginalization_frontier && session.marginalization_frontier->valid &&
+        session.marginalization_frontier->anchor_knot_index == k_lo && k_lo > 0) {
+        ceres::CostFunction* marg_cost = CreateMarginalizationPriorCost(*session.marginalization_frontier);
+        if (!marg_cost) {
+            LOG(ERROR) << "Sliding window prior is marked valid but prior cost creation failed at k_lo=" << k_lo;
+            return false;
+        }
+        const int mk = session.marginalization_frontier->anchor_knot_index;
+        problem.AddResidualBlock(
+            marg_cost,
+            nullptr,
+            delta_theta_nodes_[static_cast<size_t>(mk)].data(),
+            delta_vel_nodes_[static_cast<size_t>(mk)].data(),
+            delta_pos_nodes_[static_cast<size_t>(mk)].data(),
+            delta_bg_nodes_[static_cast<size_t>(mk)].data(),
+            delta_ba_nodes_[static_cast<size_t>(mk)].data(),
+            delta_sg_nodes_[static_cast<size_t>(mk)].data(),
+            delta_sa_nodes_[static_cast<size_t>(mk)].data());
+    }
+
+    auto interval_in_window = [&](int i) { return i >= k_lo && i + 1 <= k_hi; };
+
+    if (windowed && k_lo > 0 &&
+        !(session.marginalization_frontier && session.marginalization_frontier->valid &&
+          session.marginalization_frontier->anchor_knot_index == k_lo)) {
+        LOG(WARNING) << "Sliding window with k_lo=" << k_lo
+                     << " but no marginalization prior on that knot; left edge may be weakly constrained.";
+    }
 
     int gnss_horizontal_factor_count = 0;
     int gnss_vertical_factor_count = 0;
+    int gnss_heading_factor_count = 0;
+    const double max_available_time =
+        nominal_nav_.empty() ? -std::numeric_limits<double>::infinity() : nominal_nav_.back().time;
+    constexpr double kCausalTimeTol = 1.0e-6;
     if (config_.use_gnss_factors) {
-        for (const auto& gnss : gnss_) {
+        auto gnss_begin = gnss_.cbegin();
+        auto gnss_end = gnss_.cend();
+        if (windowed) {
+            const double window_time_lo = control_points_[static_cast<size_t>(k_lo)].Timestamp() - kCausalTimeTol;
+            const double window_time_hi =
+                std::min(control_points_[static_cast<size_t>(k_hi)].Timestamp(), max_available_time) + kCausalTimeTol;
+            gnss_begin = std::lower_bound(
+                gnss_.cbegin(),
+                gnss_.cend(),
+                window_time_lo,
+                [](const GnssMeasurement& m, double t) { return m.time < t; });
+            gnss_end = std::upper_bound(
+                gnss_begin,
+                gnss_.cend(),
+                window_time_hi,
+                [](double t, const GnssMeasurement& m) { return t < m.time; });
+        }
+        for (auto it = gnss_begin; it != gnss_end; ++it) {
+            const auto& gnss = *it;
+            // In causal sliding, only consume exteroceptive measurements that are
+            // already reachable by the current nominal/cached IMU prefix.
+            if (windowed && gnss.time > max_available_time + kCausalTimeTol) {
+                continue;
+            }
             const int start = FindNodeIntervalStart(control_points_, gnss.time);
             if (start < 0 || start + 1 >= static_cast<int>(control_points_.size())) {
+                continue;
+            }
+            if (windowed && !interval_in_window(start)) {
                 continue;
             }
             const auto nominal_state = EvaluateNominalState(nominal_nav_, gnss.time);
@@ -142,6 +266,61 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
             ++gnss_vertical_factor_count;
         }
     }
+    if (config_.yaw_bias_enable && config_.use_gnss_factors && yaw_bias_rad) {
+        for (size_t i = 1; i < gnss_.size(); ++i) {
+            const auto& g0 = gnss_[i - 1];
+            const auto& g1 = gnss_[i];
+            if (windowed && g1.time > max_available_time + kCausalTimeTol) {
+                continue;
+            }
+            const double dtg = g1.time - g0.time;
+            if (dtg <= 1.0e-3) {
+                continue;
+            }
+            const Vector3d p0_ned = Earth::GlobalToLocal(origin_blh_, g0.blh);
+            const Vector3d p1_ned = Earth::GlobalToLocal(origin_blh_, g1.blh);
+            const Vector3d vel_ned = (p1_ned - p0_ned) / dtg;
+            if (vel_ned.head<2>().norm() < config_.yaw_bias_heading_min_speed_mps) {
+                continue;
+            }
+            const double heading_meas = std::atan2(vel_ned.y(), vel_ned.x());
+            const double t_heading = g1.time;
+            const int start = FindNodeIntervalStart(control_points_, t_heading);
+            if (start < 0 || start + 1 >= static_cast<int>(control_points_.size())) {
+                continue;
+            }
+            if (windowed && !interval_in_window(start)) {
+                continue;
+            }
+            const auto nominal_state = EvaluateNominalState(nominal_nav_, t_heading);
+            if (!nominal_state) {
+                continue;
+            }
+            const double dtk = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
+            if (dtk <= 1.0e-9) {
+                continue;
+            }
+            const double u = std::clamp((t_heading - control_points_[start].Timestamp()) / dtk, 0.0, 1.0);
+            ceres::LossFunction* heading_loss = nullptr;
+            if (config_.yaw_bias_heading_cauchy_scale_rad > 0.0) {
+                const double whitened_scale =
+                    config_.yaw_bias_heading_cauchy_scale_rad /
+                    std::max(1.0e-6, config_.yaw_bias_heading_sigma_rad);
+                heading_loss = new ceres::CauchyLoss(whitened_scale);
+            }
+            problem.AddResidualBlock(
+                factors::ErrorStateYawBiasFactor::Create(
+                    u,
+                    nominal_state->q_nb,
+                    heading_meas,
+                    config_.yaw_bias_heading_sigma_rad),
+                heading_loss,
+                delta_theta_nodes_[start].data(),
+                delta_theta_nodes_[start + 1].data(),
+                yaw_bias_rad);
+            ++gnss_heading_factor_count;
+        }
+    }
 
     int nhc_factor_count = 0;
     if (config_.body_frame.enable_nhc) {
@@ -153,10 +332,41 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
             config_.body_frame.nhc_enable_vz ? config_.body_frame.nhc_sigma_vz_mps : -1.0);
         if (any_axis_enabled) {
             const size_t nhc_stride = static_cast<size_t>(std::max(1, config_.imu_stride));
-            for (size_t nhc_index = 0; nhc_index < nhc_.size(); nhc_index += nhc_stride) {
+            size_t nhc_start_index = 0;
+            size_t nhc_end_index = nhc_.size();
+            if (windowed) {
+                const double window_time_lo = control_points_[static_cast<size_t>(k_lo)].Timestamp() - kCausalTimeTol;
+                const double window_time_hi =
+                    std::min(control_points_[static_cast<size_t>(k_hi)].Timestamp(), max_available_time) + kCausalTimeTol;
+                const auto begin_it = std::lower_bound(
+                    nhc_.cbegin(),
+                    nhc_.cend(),
+                    window_time_lo,
+                    [](const NhcMeasurement& m, double t) { return m.time < t; });
+                const auto end_it = std::upper_bound(
+                    begin_it,
+                    nhc_.cend(),
+                    window_time_hi,
+                    [](double t, const NhcMeasurement& m) { return t < m.time; });
+                nhc_start_index = static_cast<size_t>(std::distance(nhc_.cbegin(), begin_it));
+                nhc_end_index = static_cast<size_t>(std::distance(nhc_.cbegin(), end_it));
+            }
+            if (nhc_stride > 1 && nhc_start_index < nhc_end_index) {
+                const size_t rem = nhc_start_index % nhc_stride;
+                if (rem != 0) {
+                    nhc_start_index += (nhc_stride - rem);
+                }
+            }
+            for (size_t nhc_index = nhc_start_index; nhc_index < nhc_end_index; nhc_index += nhc_stride) {
                 const auto& nhc = nhc_[nhc_index];
+                if (windowed && nhc.time > max_available_time + kCausalTimeTol) {
+                    continue;
+                }
                 const int start = FindNodeIntervalStart(control_points_, nhc.time);
                 if (start < 0 || start + 1 >= static_cast<int>(control_points_.size())) {
+                    continue;
+                }
+                if (windowed && !interval_in_window(start)) {
                     continue;
                 }
                 const auto nominal_state = EvaluateNominalState(nominal_nav_, nhc.time);
@@ -202,7 +412,12 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
 
     int process_factor_count = 0;
     if (config_.use_imu_factors) {
-        for (int i = 0; i + 1 < static_cast<int>(control_points_.size()); ++i) {
+        const int i_end = windowed ? std::min(k_hi - 1, static_cast<int>(control_points_.size()) - 2) : static_cast<int>(control_points_.size()) - 2;
+        const int i_begin = windowed ? k_lo : 0;
+        for (int i = i_begin; i <= i_end; ++i) {
+            if (i < 0) {
+                continue;
+            }
             if (i >= static_cast<int>(interval_cache_.knot_intervals.size())) {
                 continue;
             }
@@ -220,30 +435,70 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
                 delta_pos_nodes_[i].data(),
                 delta_bg_nodes_[i].data(),
                 delta_ba_nodes_[i].data(),
+                delta_sg_nodes_[i].data(),
+                delta_sa_nodes_[i].data(),
                 delta_theta_nodes_[i + 1].data(),
                 delta_vel_nodes_[i + 1].data(),
                 delta_pos_nodes_[i + 1].data(),
                 delta_bg_nodes_[i + 1].data(),
-                delta_ba_nodes_[i + 1].data());
+                delta_ba_nodes_[i + 1].data(),
+                delta_sg_nodes_[i + 1].data(),
+                delta_sa_nodes_[i + 1].data());
             ++process_factor_count;
         }
     }
 
     ceres::Solver::Options options;
-    options.max_num_iterations = config_.solver_max_iterations;
+    if (windowed) {
+        if (session.sliding_solver_max_iterations_override >= 1) {
+            options.max_num_iterations = session.sliding_solver_max_iterations_override;
+        } else {
+            options.max_num_iterations = config_.solver_max_iterations_window;
+        }
+        if (config_.sliding_window_function_tolerance > 0.0) {
+            options.function_tolerance = config_.sliding_window_function_tolerance;
+        }
+        if (config_.sliding_window_gradient_tolerance > 0.0) {
+            options.gradient_tolerance = config_.sliding_window_gradient_tolerance;
+        }
+    } else {
+        options.max_num_iterations = config_.solver_max_iterations;
+    }
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
     options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
     options.num_threads = std::max(1u, std::thread::hardware_concurrency());
-    options.minimizer_progress_to_stdout = true;
+    options.minimizer_progress_to_stdout = !windowed;
 
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
 
-    LOG(INFO) << "GNSS factors (horizontal / vertical): "
-              << gnss_horizontal_factor_count << " / " << gnss_vertical_factor_count;
-    LOG(INFO) << "NHC factors: " << nhc_factor_count;
-    LOG(INFO) << "Interval propagation factors: " << process_factor_count;
-    LOG(INFO) << summary.BriefReport();
+    if (windowed && session.window_solver_stats_out) {
+        session.window_solver_stats_out->num_successful_steps = summary.num_successful_steps;
+        session.window_solver_stats_out->initial_cost = summary.initial_cost;
+        session.window_solver_stats_out->final_cost = summary.final_cost;
+        session.window_solver_stats_out->termination_type = static_cast<int>(summary.termination_type);
+    }
+
+    const bool emit_window_logs = !windowed || config_.sliding_window_log_timing;
+    if (emit_window_logs) {
+        LOG(INFO) << "GNSS factors (horizontal / vertical): "
+                  << gnss_horizontal_factor_count << " / " << gnss_vertical_factor_count;
+        LOG(INFO) << "NHC factors: " << nhc_factor_count;
+        if (config_.yaw_bias_enable) {
+            LOG(INFO) << "GNSS heading yaw-bias factors: " << gnss_heading_factor_count;
+            if (yaw_bias_rad) {
+                LOG(INFO) << "Current yaw_bias_rad: " << *yaw_bias_rad;
+            }
+        }
+        LOG(INFO) << "Interval propagation factors: " << process_factor_count;
+        if (windowed) {
+            LOG(INFO) << "Window knots [" << k_lo << ", " << k_hi << "]"
+                      << (session.marginalization_frontier && session.marginalization_frontier->valid
+                              ? " (with marginalization prior)"
+                              : "");
+        }
+        LOG(INFO) << summary.BriefReport();
+    }
     return summary.termination_type != ceres::FAILURE;
 }
 

@@ -1,16 +1,19 @@
-# 余杭推车 20260122_121901；数据与参数对齐
+# 余杭推车 20260122_121901；与 zAxisPro 参考配置对齐
+# 参考: D:/Code/CT_FGO_SIM_zAxisPro/config/run_yuhang_121901_dataset_output.yaml
 # chapter5_module2 prepared_configs/zaxispro/YuHangTuiChe/20260122_121901_use__transformed1cut1/ct_fgo_sim.yaml
-# 输出改到 D:/Code/dataset/output/...
+#
+# 说明: 本仓库 (error-state FGO) 不读取 gnss_vertical_robust / gnss_vertical_deadzone；
+# 竖直鲁棒请用 gnss_vertical_cauchy_scale_m（与 Cauchy loss 对应）。
 
 gnssfile: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/rtk_ct_fgo_sim.txt"
-outputpath: "D:/Code/dataset/output/YuHangTuiChe/20260122_121901_use__transformed1cut1_zAxisPro"
+outputpath: "D:/Code/dataset/output/YuHangTuiChe/20260122_121901_use__transformed1cut1_sliding_window_FGO"
 
 imu_main:
   file: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/imu_ct_fgo_sim.txt"
   columns: 7
   rate_hz: 1000
   values_are_increments: true
-  antlever: [0, 0, 0]
+  antlever: [0.136, -0.301, -0.184]
 
 body_frame:
   q_body_imu_xyzw: [0.0, 0.0, 0.0, 1.0]
@@ -26,13 +29,17 @@ body_frame:
   nhc_sigma_vx_mps: 1000000.0
   nhc_sigma_vy_mps: 1000000.0
   nhc_sigma_vz_mps: 0.001
+  # 若使用 NHC，在此填写文件路径（与 zAxisPro 数据集侧 nhc 一致即可）
+  # nhc_file: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/nhc_ct_fgo_sim.txt"
 
 starttime: 0.0
-endtime: 0.0
+endtime: 2900.0
 aligntime: 100.0
 kf_interval_sec: 0.1
 gnss_sigma_horizontal_m: 0.02
 gnss_sigma_vertical_m: 0.050000000000000003
+# 与参考 yaml 中 huber scale ~0.03 m 量级相当的竖直 Cauchy（本程序无 huber 节点）
+gnss_vertical_cauchy_scale_m: 0.03
 gnss_vertical_robust:
   enable: true
   type: "huber"
@@ -45,7 +52,37 @@ imu_sigma_accel_mps2: 0.2
 imu_sigma_gyro_rps: 0.01
 gyro_bias_rw_sigma: 1.0e-4
 accel_bias_rw_sigma: 1.0e-3
+gyro_scale_rw_sigma: 1.0e-6
+accel_scale_rw_sigma: 1.0e-6
 bias_tau_s: 3600.0
+initgyrscale: [0.0, 0.0, 0.0]
+initaccscale: [0.0, 0.0, 0.0]
 imu_stride: 10
-outer_iterations: 1
+outer_iterations: 3
 solver_max_iterations: 30
+
+initial_yaw_feedback:
+  enable: true
+  window_s: 120.0
+  min_speed_mps: 0.8
+  min_pairs: 30
+  max_abs_deg: 25.0
+
+yaw_bias:
+  enable: false
+  prior_sigma_deg: 12.0
+  heading_sigma_deg: 8.0
+  heading_min_speed_mps: 1.0
+  heading_cauchy_scale_deg: 20.0
+  window_step_limit_deg: 1.0
+  max_abs_deg: 80.0
+
+# 滑窗 + 边缘化（默认关闭 = 全量 batch，便于与 zAxisPro 对比）
+sliding_window:
+  enable: false
+  causal: false
+  knots: 40
+  step_knots: 1
+  solver_max_iterations: 18
+  marginalization: true
+  log_timing: true
