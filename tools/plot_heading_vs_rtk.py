@@ -89,15 +89,20 @@ def main() -> None:
 
     ct_t, ct_yaw = yaw_deg_from_ct_trajectory(Path(args.traj))
     rtk_t, rtk_yaw = heading_deg_from_rtk(Path(args.rtk), args.speed_threshold)
-    rtk_interp = np.interp(ct_t, rtk_t, np.nan_to_num(rtk_yaw, nan=0.0))
-    valid = ~np.isnan(np.interp(ct_t, rtk_t, rtk_yaw, left=np.nan, right=np.nan))
+    finite = np.isfinite(rtk_yaw)
+    if np.count_nonzero(finite) < 2:
+        raise RuntimeError("Not enough finite RTK heading samples for interpolation")
+    rtk_t_valid = rtk_t[finite]
+    rtk_yaw_valid = rtk_yaw[finite]
+    rtk_interp = np.interp(ct_t, rtk_t_valid, rtk_yaw_valid)
+    valid = (ct_t >= rtk_t_valid[0]) & (ct_t <= rtk_t_valid[-1])
     err = np.full_like(ct_t, np.nan, dtype=float)
     err[valid] = wrap_deg(ct_yaw[valid] - rtk_interp[valid])
     rms = float(np.sqrt(np.nanmean(err[valid] ** 2))) if np.any(valid) else float("nan")
 
     fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
     axes[0].plot(ct_t, ct_yaw, label="CT yaw", linewidth=1.1)
-    axes[0].plot(rtk_t, rtk_yaw, label="RTK heading", linewidth=1.0)
+    axes[0].plot(rtk_t_valid, rtk_yaw_valid, label="RTK heading", linewidth=1.0)
     axes[0].set_ylabel("Heading (deg)")
     axes[0].grid(True, linestyle="--", alpha=0.4)
     axes[0].legend()

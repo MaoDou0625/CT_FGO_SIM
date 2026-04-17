@@ -398,7 +398,15 @@ bool BuildAndSolveFactorGraphGtsamBatch(FactorGraphSession& session) {
 
     if (config.use_gnss_factors) {
         const auto interval_in_window = [&](int i) { return i >= k_lo && i + 1 <= k_hi; };
+        const double kCausalTimeTol = 1.0e-6;
+        const double max_available_time = nominal.empty() ? -std::numeric_limits<double>::infinity() : nominal.back().time;
+        const double window_time_hi =
+            windowed ? (std::min(cp[static_cast<size_t>(k_hi)].Timestamp(), max_available_time) + kCausalTimeTol)
+                     : std::numeric_limits<double>::infinity();
         for (const auto& g : gnss) {
+            if (windowed && g.time > window_time_hi) {
+                break;
+            }
             const int start = FindNodeIntervalStart(cp, g.time);
             if (start < 0 || start + 1 >= static_cast<int>(cp.size())) {
                 continue;

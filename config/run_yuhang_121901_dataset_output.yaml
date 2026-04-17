@@ -64,7 +64,7 @@ initial_yaw_feedback:
   window_s: 120.0
   min_speed_mps: 0.8
   min_pairs: 30
-  max_abs_deg: 25.0
+  max_abs_deg: 90.0
 
 yaw_bias:
   enable: false

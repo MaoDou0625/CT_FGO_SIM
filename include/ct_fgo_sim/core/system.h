@@ -84,7 +84,7 @@ struct AppConfig {
     bool sliding_window_enabled = false;
     /// If true with sliding_window_enabled, run a single causal pass (grow nominal/knots forward in time)
     /// instead of replaying every window over the full log in one outer iteration.
-    bool sliding_window_causal = false;
+    bool sliding_window_causal = true;
     /// Number of knots in each window (inclusive span uses knots [k_lo, k_hi] with count = sliding_window_knots).
     int sliding_window_knots = 30;
     /// Advance the window by this many knots after each solve (marginalization supports 1 reliably).
@@ -149,7 +149,6 @@ private:
     bool ResetControlPointsFromNominalTrajectory(bool reset_biases);
     bool BuildAndSolveProblem();
     bool BuildAndSolveProblemSliding();
-    bool BuildAndSolveProblemSlidingReplayFullSpan();
     bool BuildAndSolveProblemSlidingCausal();
     bool RunSlidingWindowPass(
         int k_lo,
@@ -196,7 +195,9 @@ private:
     IntervalPropagationCache interval_cache_;
     MarginalizationFrontier marginalization_frontier_{};
     bool initial_yaw_feedback_applied_ = false;
+    size_t initial_yaw_feedback_apply_count_ = 0;
     double initial_yaw_feedback_total_rad_ = 0.0;
+    std::vector<double> initial_yaw_feedback_corrections_rad_;
     double yaw_bias_rad_ = 0.0;
     double yaw_bias_feedback_total_rad_ = 0.0;
     size_t post_opt_reprop_trigger_count_ = 0;

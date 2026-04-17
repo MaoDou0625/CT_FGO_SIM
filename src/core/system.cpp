@@ -291,6 +291,10 @@ bool System::LoadConfig(const std::filesystem::path& config_path) {
 }
 
 bool System::Run() {
+    initial_yaw_feedback_applied_ = false;
+    initial_yaw_feedback_apply_count_ = 0;
+    initial_yaw_feedback_total_rad_ = 0.0;
+    initial_yaw_feedback_corrections_rad_.clear();
     yaw_bias_rad_ = 0.0;
     yaw_bias_feedback_total_rad_ = 0.0;
     post_opt_reprop_trigger_count_ = 0;
@@ -345,6 +349,12 @@ bool System::Run() {
             return false;
         }
         return SaveOutputs();
+    }
+
+    if (config_.sliding_window_enabled && !config_.sliding_window_causal) {
+        LOG(WARNING) << "sliding_window_causal=false is deprecated; forcing causal sliding mode "
+                     << "to keep online update semantics.";
+        config_.sliding_window_causal = true;
     }
 
     if (config_.sliding_window_enabled && config_.sliding_window_causal) {
@@ -604,10 +614,7 @@ bool System::BuildAndSolveProblemSliding() {
                    << "Current 15D frontier cannot preserve historical q_body_imu coupling.";
         return false;
     }
-    if (config_.sliding_window_causal) {
-        return BuildAndSolveProblemSlidingCausal();
-    }
-    return BuildAndSolveProblemSlidingReplayFullSpan();
+    return BuildAndSolveProblemSlidingCausal();
 }
 
 bool System::RunSlidingWindowPass(
@@ -713,67 +720,10 @@ bool System::RunSlidingWindowPass(
     return true;
 }
 
-bool System::BuildAndSolveProblemSlidingReplayFullSpan() {
-    marginalization_frontier_.reset();
-    sliding_window_total_build_solve_s_ = 0.0;
-    sliding_window_total_marg_s_ = 0.0;
-    sliding_window_total_reprop_s_ = 0.0;
-    sliding_window_current_max_iterations_ = config_.solver_max_iterations_window;
-    const int n_knots = static_cast<int>(control_points_.size());
-    if (n_knots < 2) {
-        LOG(ERROR) << "Sliding window requires at least two control points";
-        return false;
-    }
-    int W = std::max(3, config_.sliding_window_knots);
-    int step = std::max(1, config_.sliding_window_step_knots);
-    if (W > 1 && step >= W) {
-        LOG(WARNING) << "sliding_window_step_knots reset from " << step
-                     << " to " << (W - 1)
-                     << " (to avoid uncovered gaps between adjacent windows)";
-        step = W - 1;
-    }
-    if (config_.sliding_window_marginalization && step != 1) {
-        LOG(WARNING) << "sliding_window_step_knots reset from " << step << " to 1 (required for marginalization)";
-        step = 1;
-    }
-    if (W > n_knots) {
-        LOG(INFO) << "Sliding window knots " << W << " > trajectory knots " << n_knots
-                  << "; solving one full-span window";
-        W = n_knots;
-    }
-
-    const auto t_wall0 = std::chrono::steady_clock::now();
-    int last_k_lo_executed = -1;
-
-    for (int k_lo = 0; k_lo + W <= n_knots; k_lo += step) {
-        const bool has_future_knot = (k_lo + W) < n_knots;
-        if (!RunSlidingWindowPass(k_lo, W, nullptr, nullptr, nullptr, has_future_knot)) {
-            return false;
-        }
-        last_k_lo_executed = k_lo;
-    }
-    const int k_tail = n_knots - W;
-    if (k_tail > last_k_lo_executed) {
-        LOG(INFO) << "Sliding window tail solve at k_lo=" << k_tail << " (covers knots to end)";
-        if (!RunSlidingWindowPass(k_tail, W, nullptr, nullptr, nullptr, false)) {
-            return false;
-        }
-    }
-
-    if (config_.sliding_window_log_timing) {
-        const auto t_wall1 = std::chrono::steady_clock::now();
-        LOG(INFO) << "Sliding window total wall (s): " << std::chrono::duration<double>(t_wall1 - t_wall0).count()
-                  << " build+solve_sum_s=" << sliding_window_total_build_solve_s_
-                  << " marginalization_sum_s=" << sliding_window_total_marg_s_
-                  << " reprop_sum_s=" << sliding_window_total_reprop_s_;
-    }
-    return true;
-}
-
 bool System::BuildAndSolveProblemSlidingCausal() {
     if (config_.outer_iterations > 1) {
-        LOG(WARNING) << "sliding_window_causal: only the first outer iteration runs the sliding estimator; "
-                     << "set outer_iterations: 1 for strict online semantics.";
+        LOG(ERROR) << "sliding_window_causal requires outer_iterations == 1 for strict online semantics.";
+        return false;
     }
 
     marginalization_frontier_.reset();
@@ -781,15 +731,6 @@ bool System::BuildAndSolveProblemSlidingCausal() {
     sliding_window_total_marg_s_ = 0.0;
     sliding_window_total_reprop_s_ = 0.0;
     sliding_window_current_max_iterations_ = config_.solver_max_iterations_window;
-
-    const NominalNavStates nominal_schedule =
-        PropagateNominalTrajectory(imu_, origin_blh_, initial_alignment_, {}, {}, {}, {}, {});
-    const spline::ControlPointArray knot_targets =
-        BuildKnotGridFromNominal(nominal_schedule, origin_blh_, config_.spline_dt_s);
-    if (knot_targets.size() < 2) {
-        LOG(ERROR) << "Causal sliding requires at least two knot targets";
-        return false;
-    }
 
     nominal_nav_.clear();
     control_points_.clear();
@@ -802,7 +743,11 @@ bool System::BuildAndSolveProblemSlidingCausal() {
     delta_sg_nodes_.clear();
     delta_sa_nodes_.clear();
 
-    const int n_knots_final = static_cast<int>(knot_targets.size());
+    if (imu_.size() < 2) {
+        LOG(ERROR) << "Causal sliding requires at least two IMU measurements";
+        return false;
+    }
+
     int W = std::max(3, config_.sliding_window_knots);
     int step = std::max(1, config_.sliding_window_step_knots);
     if (W > 1 && step >= W) {
@@ -815,28 +760,20 @@ bool System::BuildAndSolveProblemSlidingCausal() {
         LOG(WARNING) << "sliding_window_step_knots reset from " << step << " to 1 (required for marginalization)";
         step = 1;
     }
-    if (W > n_knots_final) {
-        LOG(INFO) << "Sliding window knots " << W << " > knot schedule " << n_knots_final
-                  << "; solving one full-span window";
-        W = n_knots_final;
-    }
 
     const auto t_wall0 = std::chrono::steady_clock::now();
     int last_k_lo_executed = -1;
     size_t imu_hi = 0;
-
-    for (int k = 0; k < n_knots_final; ++k) {
-        const double t_k = knot_targets[static_cast<size_t>(k)].Timestamp();
-
-        while (nominal_nav_.empty() || nominal_nav_.back().time < t_k - 1.0e-6) {
-            // Keep causal suffix mechanization representation consistent with the active graph:
-            // before global injection/relinearization, pose/vel/att/bias corrections remain in
-            // error-state nodes, so propagation uses nominal biases here.
-            const std::vector<double> bias_times;
-            const AlignedVec3Array full_bg;
-            const AlignedVec3Array full_ba;
-            const AlignedVec3Array full_sg;
-            const AlignedVec3Array full_sa;
+    const auto extend_nominal_to_time = [&](double target_time) -> bool {
+        // Keep causal suffix mechanization representation consistent with the active graph:
+        // before global injection/relinearization, pose/vel/att/bias corrections remain in
+        // error-state nodes, so propagation uses nominal biases here.
+        const std::vector<double> bias_times;
+        const AlignedVec3Array full_bg;
+        const AlignedVec3Array full_ba;
+        const AlignedVec3Array full_sg;
+        const AlignedVec3Array full_sa;
+        while (nominal_nav_.empty() || nominal_nav_.back().time < target_time - 1.0e-6) {
             if (imu_hi + 1 >= imu_.size()) {
                 ExtendNominalNavToImuIndex(
                     nominal_nav_,
@@ -849,11 +786,7 @@ bool System::BuildAndSolveProblemSlidingCausal() {
                     full_sg,
                     full_sa,
                     imu_.size() - 1);
-                if (nominal_nav_.empty() || nominal_nav_.back().time < t_k - 1.0e-6) {
-                    LOG(ERROR) << "Causal sliding: IMU stream ends before knot time " << t_k;
-                    return false;
-                }
-                break;
+                return !nominal_nav_.empty() && nominal_nav_.back().time >= target_time - 1.0e-6;
             }
             ExtendNominalNavToImuIndex(
                 nominal_nav_,
@@ -866,11 +799,34 @@ bool System::BuildAndSolveProblemSlidingCausal() {
                 full_sg,
                 full_sa,
                 imu_hi);
-            if (nominal_nav_.back().time < t_k - 1.0e-6) {
+            if (!nominal_nav_.empty() && nominal_nav_.back().time < target_time - 1.0e-6) {
                 ++imu_hi;
             }
         }
+        return true;
+    };
 
+    const auto snap_to_nearest_nominal_time_prefix = [&](double t) -> double {
+        const auto upper = std::lower_bound(
+            nominal_nav_.begin(),
+            nominal_nav_.end(),
+            t,
+            [](const NominalNavState& state, double time) { return state.time < time; });
+        if (upper == nominal_nav_.begin()) {
+            return nominal_nav_.front().time;
+        }
+        if (upper == nominal_nav_.end()) {
+            return nominal_nav_.back().time;
+        }
+        const double t1 = upper->time;
+        const double t0 = (upper - 1)->time;
+        return (std::abs(t1 - t) < std::abs(t - t0)) ? t1 : t0;
+    };
+
+    const auto append_knot_and_maybe_solve = [&](double t_k, bool has_future_knot) -> bool {
+        if (!control_points_.empty() && t_k <= control_points_.back().Timestamp() + 1.0e-9) {
+            return true;
+        }
         const auto nominal_state = EvaluateNominalState(nominal_nav_, t_k);
         if (!nominal_state) {
             LOG(ERROR) << "Causal sliding: failed to evaluate nominal at knot time " << t_k;
@@ -921,15 +877,73 @@ bool System::BuildAndSolveProblemSlidingCausal() {
                 if (config_.sliding_window_log_timing) {
                     LOG(INFO) << "Causal sliding: solve window k_lo=" << k_lo << " k_hi=" << (k_lo + W - 1);
                 }
-                const bool has_future_knot = (k + 1) < n_knots_final;
                 if (!RunSlidingWindowPass(k_lo, W, nullptr, nullptr, nullptr, has_future_knot)) {
                     return false;
                 }
                 last_k_lo_executed = k_lo;
             }
         }
+        return true;
+    };
+
+    if (config_.spline_dt_s <= 0.0) {
+        LOG(ERROR) << "Causal sliding requires spline_dt_s > 0";
+        return false;
+    }
+    const double knot_dt = config_.spline_dt_s;
+    const double start_time = imu_.front().time;
+    double next_knot_target_time = start_time;
+    bool stream_finished = false;
+
+    while (true) {
+        if (!extend_nominal_to_time(next_knot_target_time)) {
+            stream_finished = true;
+            if (nominal_nav_.empty()) {
+                LOG(ERROR) << "Causal sliding: nominal propagation failed before first knot";
+                return false;
+            }
+        }
+
+        const double available_time = nominal_nav_.back().time;
+        if (available_time < next_knot_target_time - 1.0e-6 && !stream_finished) {
+            continue;
+        }
+
+        if (!stream_finished &&
+            imu_hi + 1 >= imu_.size() &&
+            next_knot_target_time >= available_time - 1.0e-6) {
+            stream_finished = true;
+        }
+
+        const double t_k = snap_to_nearest_nominal_time_prefix(std::min(next_knot_target_time, available_time));
+        const bool has_future_knot =
+            !stream_finished && ((available_time > t_k + 1.0e-6) || (imu_hi + 1 < imu_.size()));
+        if (!append_knot_and_maybe_solve(t_k, has_future_knot)) {
+            return false;
+        }
+
+        if (stream_finished) {
+            break;
+        }
+
+        next_knot_target_time += knot_dt;
     }
 
+    const double final_time = nominal_nav_.empty() ? start_time : nominal_nav_.back().time;
+    if (!append_knot_and_maybe_solve(final_time, false)) {
+        return false;
+    }
+
+    const int n_knots_final = static_cast<int>(control_points_.size());
+    if (n_knots_final < 2) {
+        LOG(ERROR) << "Causal sliding requires at least two knot targets";
+        return false;
+    }
+    if (W > n_knots_final) {
+        LOG(INFO) << "Sliding window knots " << W << " > generated knots " << n_knots_final
+                  << "; solving one full-span window";
+        W = n_knots_final;
+    }
     const int k_tail = n_knots_final - W;
     if (k_tail > last_k_lo_executed && k_tail >= 0) {
         LOG(INFO) << "Causal sliding: tail solve at k_lo=" << k_tail;
@@ -950,7 +964,7 @@ bool System::BuildAndSolveProblemSlidingCausal() {
 }
 
 bool System::ApplyInitialYawFeedbackFromGnss() {
-    if (!config_.enable_initial_yaw_feedback || initial_yaw_feedback_applied_ || gnss_.size() < 2) {
+    if (!config_.enable_initial_yaw_feedback || gnss_.size() < 2) {
         return false;
     }
 
@@ -1121,7 +1135,9 @@ bool System::ApplyInitialYawFeedbackFromGnss() {
     initial_alignment_.q_nb = (q_yaw_correction * initial_alignment_.q_nb).normalized();
     initial_q_nb_ = initial_alignment_.q_nb;
     initial_yaw_feedback_applied_ = true;
+    initial_yaw_feedback_apply_count_ += 1;
     initial_yaw_feedback_total_rad_ += yaw_correction;
+    initial_yaw_feedback_corrections_rad_.push_back(yaw_correction);
 
     LOG(INFO) << "Injected initial yaw feedback from RTK heading, correction = "
               << yaw_correction << " rad (" << yaw_correction / kDegToRad << " deg)"
@@ -1476,6 +1492,12 @@ bool System::RepropagateNominalToLatestImuAfterOptimization(int reprop_knot_lo, 
         post_opt_reprop_incremental_count_ += 1;
     } catch (const std::exception& ex) {
         LOG(WARNING) << "Post-optimization incremental repropagation failed, fallback to full rebuild: " << ex.what();
+        if (config_.sliding_window_enabled && config_.sliding_window_causal) {
+            LOG(ERROR) << "Strict causal mode forbids full-log repropagation fallback; aborting.";
+            nominal_nav_ = std::move(nominal_backup);
+            interval_cache_ = std::move(cache_backup);
+            return false;
+        }
         nominal_nav_ = std::move(nominal_backup);
         interval_cache_ = std::move(cache_backup);
         try {
@@ -1757,7 +1779,13 @@ bool System::SaveOutputs() const {
     summary_ofs << "outer_iterations: " << config_.outer_iterations << '\n';
     summary_ofs << "enable_initial_yaw_feedback: " << config_.enable_initial_yaw_feedback << '\n';
     summary_ofs << "initial_yaw_feedback_applied: " << initial_yaw_feedback_applied_ << '\n';
+    summary_ofs << "initial_yaw_feedback_apply_count: " << initial_yaw_feedback_apply_count_ << '\n';
     summary_ofs << "initial_yaw_feedback_total_rad: " << initial_yaw_feedback_total_rad_ << '\n';
+    summary_ofs << "initial_yaw_feedback_corrections_rad:";
+    for (const double correction : initial_yaw_feedback_corrections_rad_) {
+        summary_ofs << ' ' << correction;
+    }
+    summary_ofs << '\n';
     summary_ofs << "propagation_heading_error_rad_est: " << propagation_heading_error_rad_est << '\n';
     summary_ofs << "propagation_heading_error_deg_est: " << (propagation_heading_error_rad_est * 180.0 / M_PI) << '\n';
     summary_ofs << "propagation_heading_error_sample_count: " << propagation_heading_error_sample_count << '\n';
