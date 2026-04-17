@@ -13,6 +13,7 @@
 #include <glog/logging.h>
 #include <yaml-cpp/yaml.h>
 
+#include <cctype>
 #include <cmath>
 #include <algorithm>
 #include <filesystem>
@@ -22,6 +23,29 @@ namespace ct_fgo_sim {
 namespace {
 
 constexpr double kDegToRad = M_PI / 180.0;
+
+std::vector<TimeRange> ParseRtkOutageRanges(const YAML::Node& ranges_node) {
+    std::vector<TimeRange> ranges;
+    if (!ranges_node || !ranges_node.IsSequence()) {
+        return ranges;
+    }
+    for (const auto& item : ranges_node) {
+        if (!item.IsSequence() || item.size() != 2) {
+            continue;
+        }
+        const double t0 = item[0].as<double>();
+        const double t1 = item[1].as<double>();
+        if (!std::isfinite(t0) || !std::isfinite(t1)) {
+            continue;
+        }
+        ranges.push_back(TimeRange{std::min(t0, t1), std::max(t0, t1)});
+    }
+    std::sort(
+        ranges.begin(),
+        ranges.end(),
+        [](const TimeRange& lhs, const TimeRange& rhs) { return lhs.start_time < rhs.start_time; });
+    return ranges;
+}
 
 }  // namespace
 
@@ -183,6 +207,26 @@ bool LoadAppConfigYaml(
         if (sw["adaptive_solver_min_iterations"]) {
             config.sliding_window_adaptive_solver_min_iterations =
                 std::max(1, sw["adaptive_solver_min_iterations"].as<int>());
+        }
+    }
+    if (cfg["rtk_outage"]) {
+        const YAML::Node outage = cfg["rtk_outage"];
+        if (outage["ranges"]) {
+            config.rtk_outage_ranges = ParseRtkOutageRanges(outage["ranges"]);
+        }
+        if (outage["recovery_horizon_s"]) {
+            config.rtk_recovery_horizon_s = std::max(0.0, outage["recovery_horizon_s"].as<double>());
+        }
+        if (outage["freeze_imu_error_params_in_outage"]) {
+            config.freeze_imu_error_params_in_outage = outage["freeze_imu_error_params_in_outage"].as<bool>();
+        }
+        if (outage["retro_opt_mode"]) {
+            config.retro_opt_mode = outage["retro_opt_mode"].as<std::string>();
+            std::transform(
+                config.retro_opt_mode.begin(),
+                config.retro_opt_mode.end(),
+                config.retro_opt_mode.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         }
     }
     if (cfg["output_query_dt_s"]) {

@@ -578,6 +578,16 @@ FactorGraphSession System::MakeFactorGraphSession() {
     session.config = &config_;
     session.origin_blh = &origin_blh_;
     session.gnss = &gnss_;
+    if (!config_.rtk_outage_ranges.empty()) {
+        session_gnss_buffer_.clear();
+        session_gnss_buffer_.reserve(gnss_.size());
+        for (const auto& m : gnss_) {
+            if (!IsTimeInRtkOutage(m.time)) {
+                session_gnss_buffer_.push_back(m);
+            }
+        }
+        session.gnss = &session_gnss_buffer_;
+    }
     session.imu = &imu_;
     session.nhc = &nhc_;
     session.control_points = &control_points_;
@@ -702,9 +712,15 @@ bool System::RunSlidingWindowPass(
                                     k_hi + std::max(1, config_.sliding_window_step_knots),
                                     static_cast<int>(control_points_.size()) - 1)
                               : k_hi;
-    if (!RepropagateNominalToLatestImuAfterOptimization(k_lo, reprop_hi)) {
-        LOG(ERROR) << "Sliding window step repropagation failed at k_lo=" << k_lo;
-        return false;
+    const bool skip_window_reprop_for_gtsam =
+        (config_.graph_backend == GraphBackend::Gtsam) &&
+        config_.sliding_window_enabled &&
+        config_.sliding_window_causal;
+    if (!skip_window_reprop_for_gtsam) {
+        if (!RepropagateNominalToLatestImuAfterOptimization(k_lo, reprop_hi)) {
+            LOG(ERROR) << "Sliding window step repropagation failed at k_lo=" << k_lo;
+            return false;
+        }
     }
     const auto tr1 = std::chrono::steady_clock::now();
     const double dt_reprop = std::chrono::duration<double>(tr1 - tr0).count();
@@ -960,6 +976,13 @@ bool System::BuildAndSolveProblemSlidingCausal() {
                   << " reprop_sum_s=" << sliding_window_total_reprop_s_;
     }
 
+    if (!config_.rtk_outage_ranges.empty() && config_.retro_opt_mode == "replay") {
+        if (!RunRtkOutageReplayOptimization()) {
+            LOG(ERROR) << "RTK outage replay optimization failed";
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -980,6 +1003,9 @@ bool System::ApplyInitialYawFeedbackFromGnss() {
 
         const double mid_time = 0.5 * (gnss_[i].time + gnss_[i - 1].time);
         if (mid_time < initial_alignment_.reference_time || mid_time > window_end_time) {
+            continue;
+        }
+        if (IntervalOverlapsRtkOutage(gnss_[i - 1].time, gnss_[i].time)) {
             continue;
         }
 
@@ -1305,16 +1331,22 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory() {
         nominal_state.vel_ned += *delta_vel;
         const Vector3d nominal_local_ned = Earth::GlobalToLocal(origin_blh_, nominal_state.blh);
         nominal_state.blh = Earth::LocalToGlobal(origin_blh_, nominal_local_ned + *delta_pos);
-        nominal_state.bg += *delta_bg;
-        nominal_state.ba += *delta_ba;
-        nominal_state.sg += *delta_sg;
-        nominal_state.sa += *delta_sa;
+        const bool freeze_bias_scale =
+            config_.freeze_imu_error_params_in_outage && IsTimeInRtkOutage(nominal_state.time);
+        if (!freeze_bias_scale) {
+            nominal_state.bg += *delta_bg;
+            nominal_state.ba += *delta_ba;
+            nominal_state.sg += *delta_sg;
+            nominal_state.sa += *delta_sa;
+        }
 
         max_delta_theta_norm = std::max(max_delta_theta_norm, delta_theta->norm());
         max_delta_vel_norm = std::max(max_delta_vel_norm, delta_vel->norm());
         max_delta_pos_norm = std::max(max_delta_pos_norm, delta_pos->norm());
-        max_delta_bg_norm = std::max(max_delta_bg_norm, delta_bg->norm());
-        max_delta_ba_norm = std::max(max_delta_ba_norm, delta_ba->norm());
+        if (!freeze_bias_scale) {
+            max_delta_bg_norm = std::max(max_delta_bg_norm, delta_bg->norm());
+            max_delta_ba_norm = std::max(max_delta_ba_norm, delta_ba->norm());
+        }
     }
 
     if (!nominal_nav_.empty()) {
@@ -1382,6 +1414,96 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory() {
     return true;
 }
 
+bool System::IsTimeInRtkOutage(double time) const {
+    for (const auto& range : config_.rtk_outage_ranges) {
+        if (time >= range.start_time && time <= range.end_time) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool System::IntervalOverlapsRtkOutage(double t0, double t1) const {
+    if (config_.rtk_outage_ranges.empty()) {
+        return false;
+    }
+    double lo = t0;
+    double hi = t1;
+    if (lo > hi) {
+        std::swap(lo, hi);
+    }
+    for (const auto& range : config_.rtk_outage_ranges) {
+        if (hi < range.start_time || lo > range.end_time) {
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+std::optional<std::pair<int, int>> System::BuildReplayWindowKnotsForOutage(const TimeRange& outage) const {
+    if (control_points_.size() < 2) {
+        return std::nullopt;
+    }
+    const double replay_start = outage.start_time;
+    const double replay_end = outage.end_time + std::max(0.0, config_.rtk_recovery_horizon_s);
+    int k_lo = -1;
+    int k_hi = -1;
+    for (int k = 0; k < static_cast<int>(control_points_.size()); ++k) {
+        const double t_k = control_points_[static_cast<size_t>(k)].Timestamp();
+        if (k_lo < 0 && t_k >= replay_start) {
+            k_lo = std::max(0, k - 1);
+        }
+        if (t_k <= replay_end) {
+            k_hi = k;
+        }
+    }
+    if (k_lo < 0 || k_hi <= k_lo) {
+        return std::nullopt;
+    }
+    return std::make_pair(k_lo, k_hi);
+}
+
+bool System::RunRtkOutageReplayOptimization() {
+    if (!config_.use_gnss_factors || config_.rtk_outage_ranges.empty()) {
+        return true;
+    }
+    if (!config_.sliding_window_enabled) {
+        const bool ok = BuildAndSolveProblem();
+        if (!ok) {
+            LOG(ERROR) << "Replay optimization failed in batch mode";
+            return false;
+        }
+        if (!InjectCurrentErrorStateIntoNominalTrajectory()) {
+            LOG(ERROR) << "Failed to inject replay result in batch mode";
+            return false;
+        }
+        if (!RepropagateNominalToLatestImuAfterOptimization(0, static_cast<int>(control_points_.size()) - 1)) {
+            LOG(ERROR) << "Failed to repropagate replay result in batch mode";
+            return false;
+        }
+        return true;
+    }
+    for (const auto& outage : config_.rtk_outage_ranges) {
+        const auto replay_window = BuildReplayWindowKnotsForOutage(outage);
+        if (!replay_window) {
+            continue;
+        }
+        const int k_lo = replay_window->first;
+        const int k_hi = replay_window->second;
+        const int W = k_hi - k_lo + 1;
+        if (W < 2) {
+            continue;
+        }
+        if (!RunSlidingWindowPass(k_lo, W, nullptr, nullptr, nullptr, false)) {
+            LOG(ERROR) << "Replay optimization failed for outage [" << outage.start_time
+                       << ", " << outage.end_time << "]";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool System::RepropagateNominalToLatestImuAfterOptimization(int reprop_knot_lo, int reprop_knot_hi) {
     if (imu_.empty() || nominal_nav_.empty() || control_points_.empty()) {
         return true;
@@ -1413,16 +1535,18 @@ bool System::RepropagateNominalToLatestImuAfterOptimization(int reprop_knot_lo, 
         const double t_k = control_point.Timestamp();
         bias_times.push_back(t_k);
         const auto nominal_k = EvaluateNominalState(nominal_nav_, t_k);
+        const bool freeze_bias_scale =
+            config_.freeze_imu_error_params_in_outage && IsTimeInRtkOutage(t_k);
         if (nominal_k) {
-            full_bg_nodes.push_back(nominal_k->bg + delta_bg_nodes_[k]);
-            full_ba_nodes.push_back(nominal_k->ba + delta_ba_nodes_[k]);
-            full_sg_nodes.push_back(nominal_k->sg + delta_sg_nodes_[k]);
-            full_sa_nodes.push_back(nominal_k->sa + delta_sa_nodes_[k]);
+            full_bg_nodes.push_back(nominal_k->bg + (freeze_bias_scale ? Vector3d::Zero() : delta_bg_nodes_[k]));
+            full_ba_nodes.push_back(nominal_k->ba + (freeze_bias_scale ? Vector3d::Zero() : delta_ba_nodes_[k]));
+            full_sg_nodes.push_back(nominal_k->sg + (freeze_bias_scale ? Vector3d::Zero() : delta_sg_nodes_[k]));
+            full_sa_nodes.push_back(nominal_k->sa + (freeze_bias_scale ? Vector3d::Zero() : delta_sa_nodes_[k]));
         } else {
-            full_bg_nodes.push_back(initial_alignment_.bg0 + delta_bg_nodes_[k]);
-            full_ba_nodes.push_back(initial_alignment_.ba0 + delta_ba_nodes_[k]);
-            full_sg_nodes.push_back(config_.init_sg + delta_sg_nodes_[k]);
-            full_sa_nodes.push_back(config_.init_sa + delta_sa_nodes_[k]);
+            full_bg_nodes.push_back(initial_alignment_.bg0 + (freeze_bias_scale ? Vector3d::Zero() : delta_bg_nodes_[k]));
+            full_ba_nodes.push_back(initial_alignment_.ba0 + (freeze_bias_scale ? Vector3d::Zero() : delta_ba_nodes_[k]));
+            full_sg_nodes.push_back(config_.init_sg + (freeze_bias_scale ? Vector3d::Zero() : delta_sg_nodes_[k]));
+            full_sa_nodes.push_back(config_.init_sa + (freeze_bias_scale ? Vector3d::Zero() : delta_sa_nodes_[k]));
         }
     }
 
@@ -1723,6 +1847,9 @@ bool System::SaveOutputs() const {
             const auto& curr = gnss_[i];
             const double dt = curr.time - prev.time;
             if (dt <= 1.0e-3) {
+                continue;
+            }
+            if (IntervalOverlapsRtkOutage(prev.time, curr.time)) {
                 continue;
             }
             const Vector3d p_prev = Earth::GlobalToLocal(origin_blh_, prev.blh);

@@ -337,14 +337,19 @@ bool BuildAndSolveFactorGraphGtsamBatch(FactorGraphSession& session) {
     }
 
     for (int k = k_lo; k <= k_hi; ++k) {
-        initial.insert(gtsam::Symbol('x', static_cast<uint64_t>(k)), ToStateVec21(
+        const gtsam::Vector x0 = ToStateVec21(
             dtheta[static_cast<size_t>(k)],
             dvel[static_cast<size_t>(k)],
             dpos[static_cast<size_t>(k)],
             dbg[static_cast<size_t>(k)],
             dba[static_cast<size_t>(k)],
             dsg[static_cast<size_t>(k)],
-            dsa[static_cast<size_t>(k)]));
+            dsa[static_cast<size_t>(k)]);
+        if (!x0.allFinite()) {
+            g_last_backend_fallback_reason = "non_finite_initial_state";
+            return false;
+        }
+        initial.insert(gtsam::Symbol('x', static_cast<uint64_t>(k)), x0);
     }
 
     const gtsam::Key yaw_bias_key = gtsam::Symbol('b', 0);
@@ -373,6 +378,12 @@ bool BuildAndSolveFactorGraphGtsamBatch(FactorGraphSession& session) {
             session.marginalization_frontier->x0,
             session.marginalization_frontier->H,
             session.marginalization_frontier->g));
+    } else if (windowed && k_lo > 0) {
+        // Keep the left edge of non-marginalized windows anchored to the incoming trajectory estimate.
+        graph.add(gtsam::PriorFactor<gtsam::Vector>(
+            gtsam::Symbol('x', static_cast<uint64_t>(k_lo)),
+            initial.at<gtsam::Vector>(gtsam::Symbol('x', static_cast<uint64_t>(k_lo))),
+            gtsam::noiseModel::Isotropic::Sigma(21, 1.0e-5)));
     }
 
     // Permutation from Ceres block order to propagation internal order inside the interval factors.
@@ -384,6 +395,10 @@ bool BuildAndSolveFactorGraphGtsamBatch(FactorGraphSession& session) {
             const auto& knot = cache.knot_intervals[static_cast<size_t>(i)];
             if (!knot.valid) {
                 g_last_backend_fallback_reason = "invalid_interval_cache";
+                return false;
+            }
+            if (!knot.phi.allFinite() || !knot.sqrt_info.allFinite()) {
+                g_last_backend_fallback_reason = "non_finite_interval_cache";
                 return false;
             }
             auto model = gtsam::noiseModel::Gaussian::SqrtInformation(knot.sqrt_info);
@@ -457,6 +472,11 @@ bool BuildAndSolveFactorGraphGtsamBatch(FactorGraphSession& session) {
     }
     params.verbosityLM = (config.gtsam_verbose_optimizer ? gtsam::LevenbergMarquardtParams::SUMMARY
                                                          : gtsam::LevenbergMarquardtParams::SILENT);
+    if (windowed) {
+        params.linearSolverType = gtsam::NonlinearOptimizerParams::SEQUENTIAL_QR;
+        params.diagonalDamping = true;
+        params.lambdaInitial = 1.0e-2;
+    }
     const gtsam::Values result = gtsam::LevenbergMarquardtOptimizer(graph, initial, params).optimize();
     for (int k = k_lo; k <= k_hi; ++k) {
         const gtsam::Vector x = result.at<gtsam::Vector>(gtsam::Symbol('x', static_cast<uint64_t>(k)));

@@ -15,6 +15,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -40,6 +41,34 @@ try:
 except ImportError:
     interp1d = None
     SciRotation = None
+
+
+def parse_rtk_outage_yaml(yaml_path: Path) -> tuple[list[tuple[float, float]], float]:
+    """Read `rtk_outage.ranges` and `recovery_horizon_s` without PyYAML."""
+    text = yaml_path.read_text(encoding="utf-8", errors="replace")
+    in_block = False
+    ranges: list[tuple[float, float]] = []
+    recovery = 20.0
+    for raw in text.splitlines():
+        line = raw.rstrip("\n")
+        if line.strip().startswith("rtk_outage:"):
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        if line.strip() and not line.startswith(" ") and not line.startswith("\t"):
+            break
+        m = re.match(r"^\s+-\s*\[\s*([0-9.eE+-]+)\s*,\s*([0-9.eE+-]+)\s*\]", line)
+        if m:
+            t0, t1 = float(m.group(1)), float(m.group(2))
+            lo, hi = (t0, t1) if t0 <= t1 else (t1, t0)
+            ranges.append((lo, hi))
+        m2 = re.match(r"^\s*recovery_horizon_s:\s*([0-9.eE+-]+)", line)
+        if m2:
+            recovery = float(m2.group(1))
+    if not ranges:
+        raise ValueError(f"No rtk_outage ranges found in {yaml_path}")
+    return ranges, recovery
 
 
 def load_dense(path: Path) -> tuple[np.ndarray, ...]:
@@ -133,6 +162,12 @@ def main() -> int:
     p.add_argument("other", type=Path, help="Other trajectory (e.g. sliding)")
     p.add_argument("-o", "--output", type=Path, default=None, help="Output image path (.png / .pdf)")
     p.add_argument("--max-points", type=int, default=8000, help="Max points on common time grid")
+    p.add_argument(
+        "--rtk-outage-yaml",
+        type=Path,
+        default=None,
+        help="App YAML containing rtk_outage (ranges + recovery_horizon_s); draws vertical highlight bands",
+    )
     args = p.parse_args()
 
     if interp1d is None or SciRotation is None:
@@ -174,6 +209,26 @@ def main() -> int:
 
     t_rel = t_grid - t_min
 
+    outage_ranges: list[tuple[float, float]] = []
+    recovery_h: float | None = None
+    if args.rtk_outage_yaml is not None:
+        outage_ranges, recovery_h = parse_rtk_outage_yaml(args.rtk_outage_yaml.resolve())
+
+    def axv_outage_recovery(ax) -> None:
+        if not outage_ranges or recovery_h is None:
+            return
+        x_left = float(t_rel[0])
+        x_right = float(t_rel[-1])
+        for a, b in outage_ranges:
+            xa = max(x_left, a - t_min)
+            xb = min(x_right, b - t_min)
+            if xa < xb:
+                ax.axvspan(xa, xb, facecolor="salmon", alpha=0.22, linewidth=0, zorder=0)
+            xr0 = max(x_left, b - t_min)
+            xr1 = min(x_right, b + recovery_h - t_min)
+            if xr0 < xr1:
+                ax.axvspan(xr0, xr1, facecolor="lightgreen", alpha=0.18, linewidth=0, zorder=0)
+
     fig, axes = plt.subplots(4, 3, figsize=(14, 12), sharex=True, constrained_layout=True)
     ref_label = "reference"
     oth_label = "other"
@@ -189,6 +244,9 @@ def main() -> int:
         ax0 = axes[row, 0]
         ax1 = axes[row, 1]
         ax2 = axes[row, 2]
+        axv_outage_recovery(ax0)
+        axv_outage_recovery(ax1)
+        axv_outage_recovery(ax2)
         ax0.plot(t_rel, a0, color="C0", lw=0.8, label=ref_label)
         ax0.set_ylabel(name)
         ax0.legend(loc="upper right", fontsize=8)
@@ -210,6 +268,7 @@ def main() -> int:
         ]
     ):
         ax0 = axes[3, col]
+        axv_outage_recovery(ax0)
         ax0.plot(t_rel, a0, color="C0", lw=0.7, alpha=0.9, label=ref_label)
         ax0.plot(t_rel, a1, color="C1", lw=0.7, alpha=0.9, label=oth_label)
         ax0.set_ylabel(name)
@@ -220,13 +279,17 @@ def main() -> int:
     axes[3, 1].set_xlabel("time − t₀ (s)")
     axes[3, 2].set_xlabel("time − t₀ (s)")
 
+    title_extra = ""
+    if outage_ranges and recovery_h is not None:
+        title_extra = "\n(shaded: RTK outage, recovery)"
     fig.suptitle(
-        f"Navigation compare\nref: {args.reference.name}\nother: {args.other.name}",
+        f"Navigation compare\nref: {args.reference.name}\nother: {args.other.name}{title_extra}",
         fontsize=11,
     )
 
     # Extra small figure: quaternion geodesic angle
     fig2, ax = plt.subplots(figsize=(10, 3), constrained_layout=True)
+    axv_outage_recovery(ax)
     ax.plot(t_rel, ang, color="C3", lw=0.8)
     ax.set_ylabel("|q_err| (deg)")
     ax.set_xlabel("time − t₀ (s)")

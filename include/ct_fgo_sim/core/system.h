@@ -12,9 +12,15 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ct_fgo_sim {
+
+struct TimeRange {
+    double start_time = 0.0;
+    double end_time = 0.0;
+};
 
 struct ImuConfig {
     std::string file;
@@ -73,6 +79,10 @@ struct AppConfig {
     int solver_max_iterations = 20;
     bool use_gnss_factors = true;
     bool use_imu_factors = true;
+    std::vector<TimeRange> rtk_outage_ranges;
+    double rtk_recovery_horizon_s = 20.0;
+    bool freeze_imu_error_params_in_outage = true;
+    std::string retro_opt_mode = "none";
     /// Factor graph backend selector: ceres (default) or gtsam.
     GraphBackend graph_backend = GraphBackend::Ceres;
     /// If true, allow explicit fallback to Ceres when requested GTSAM path
@@ -162,6 +172,10 @@ private:
     bool ApplyInitialYawFeedbackFromGnss();
     bool InjectCurrentErrorStateIntoNominalTrajectory();
     bool RepropagateNominalToLatestImuAfterOptimization(int reprop_knot_lo, int reprop_knot_hi);
+    bool RunRtkOutageReplayOptimization();
+    bool IsTimeInRtkOutage(double time) const;
+    bool IntervalOverlapsRtkOutage(double t0, double t1) const;
+    std::optional<std::pair<int, int>> BuildReplayWindowKnotsForOutage(const TimeRange& outage) const;
     std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
     std::optional<Vector3d> EvaluateNominalAccelAtTime(double time) const;
     std::optional<Vector3d> EvaluateNodeValueAtTime(
@@ -174,6 +188,7 @@ private:
 
     AppConfig config_;
     GnssMeasurementArray gnss_;
+    GnssMeasurementArray session_gnss_buffer_;
     ImuMeasurementArray imu_;
     NhcMeasurementArray nhc_;
     spline::ControlPointArray control_points_;
