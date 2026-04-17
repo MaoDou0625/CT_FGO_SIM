@@ -3,7 +3,7 @@
 # chapter5_module2 prepared_configs/zaxispro/YuHangTuiChe/20260122_121901_use__transformed1cut1/ct_fgo_sim.yaml
 #
 # 说明: 本仓库 (error-state FGO) 不读取 gnss_vertical_robust / gnss_vertical_deadzone；
-# 竖直鲁棒请用 gnss_vertical_cauchy_scale_m（与 Cauchy loss 对应）。
+# 竖直观测为高斯噪声，由 gnss_sigma_vertical_m（米，1σ）表征。
 
 gnssfile: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/rtk_ct_fgo_sim.txt"
 outputpath: "D:/Code/dataset/output/YuHangTuiChe/20260122_121901_use__transformed1cut1_sliding_window_FGO"
@@ -38,8 +38,6 @@ aligntime: 100.0
 kf_interval_sec: 0.1
 gnss_sigma_horizontal_m: 0.02
 gnss_sigma_vertical_m: 0.050000000000000003
-# 与参考 yaml 中 huber scale ~0.03 m 量级相当的竖直 Cauchy（本程序无 huber 节点）
-gnss_vertical_cauchy_scale_m: 0.03
 gnss_vertical_robust:
   enable: true
   type: "huber"
@@ -71,9 +69,6 @@ initial_yaw_feedback:
 yaw_bias:
   enable: false
   prior_sigma_deg: 12.0
-  heading_sigma_deg: 8.0
-  heading_min_speed_mps: 1.0
-  heading_cauchy_scale_deg: 20.0
   window_step_limit_deg: 1.0
   max_abs_deg: 80.0
 

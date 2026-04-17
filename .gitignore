@@ -1,4 +1,5 @@
 build/
+build-gtsam*/
 build_agent/
 build_reconfig/
 build_zaxis/

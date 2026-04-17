@@ -1,8 +1,8 @@
-# 与 run_yuhang_121901_dataset_output.yaml 相同数据源；短时裁剪便于 batch vs sliding 快速对比
-# 全量 batch（滑窗关闭）
-
+# batch benchmark variant for real gtsam batch solver path
 gnssfile: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/rtk_ct_fgo_sim.txt"
-outputpath: "D:/Code/dataset/output/YuHangTuiChe/20260122_121901_use__transformed1cut1_compare_batch_FGO"
+outputpath: "D:/Code/dataset/output/YuHangTuiChe/20260122_121901_use__transformed1cut1_compare_batch_FGO_gtsam"
+backend: "gtsam"
+gtsam_allow_ceres_fallback: false
 
 imu_main:
   file: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/imu_ct_fgo_sim.txt"
@@ -26,13 +26,12 @@ body_frame:
   nhc_sigma_vy_mps: 1000000.0
   nhc_sigma_vz_mps: 0.001
 
-# 与 rtk_ct_fgo_sim.txt 时间戳同域（约 2.39e3 s）；取约 80 s 片段（须 > aligntime）
 starttime: 2387.9
 endtime: 2467.9
 aligntime: 25.0
 kf_interval_sec: 0.1
 gnss_sigma_horizontal_m: 0.02
-gnss_sigma_vertical_m: 0.050000000000000003
+gnss_sigma_vertical_m: 0.05
 imu_sigma_accel_mps2: 0.2
 imu_sigma_gyro_rps: 0.01
 gyro_bias_rw_sigma: 1.0e-4

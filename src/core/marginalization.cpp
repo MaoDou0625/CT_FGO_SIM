@@ -89,7 +89,6 @@ bool AppendGnssHessian30(
     ceres::CostFunction* cost,
     int residual_dim,
     const double* const p4[4],
-    double cauchy_scale_whitened,
     Matrix30d& H,
     Vector30d& g) {
     std::vector<double> residuals(static_cast<size_t>(residual_dim), 0.0);
@@ -116,15 +115,6 @@ bool AppendGnssHessian30(
     Jbig.block(0, 0, residual_dim, 3) = J.block(0, 6, residual_dim, 3);           // dtheta_i
     Jbig.block(0, 21 + 0, residual_dim, 3) = J.block(0, 9, residual_dim, 3);      // dtheta_j
     Eigen::Map<Eigen::VectorXd> r_vec(residuals.data(), residual_dim);
-    if (residual_dim == 1 && cauchy_scale_whitened > 0.0) {
-        // Mirror the vertical Cauchy robustification used in the main Ceres graph.
-        const double c2 = cauchy_scale_whitened * cauchy_scale_whitened;
-        const double s = r_vec[0] * r_vec[0];
-        const double rho_prime = 1.0 / (1.0 + s / std::max(1.0e-12, c2));
-        const double w = std::sqrt(std::max(0.0, rho_prime));
-        Jbig *= w;
-        r_vec *= w;
-    }
     H += Jbig.transpose() * Jbig;
     g += Jbig.transpose() * r_vec;
     return true;
@@ -301,7 +291,7 @@ bool MarginalizeOldestKnotTwoKnotWindow(
                 *session.lever_arm,
                 meas_pos_ned,
                 cfg.gnss_sigma_horizontal_m));
-            AppendGnssHessian30(ch.get(), 2, p4h, 0.0, H, g);
+            AppendGnssHessian30(ch.get(), 2, p4h, H, g);
             std::unique_ptr<ceres::CostFunction> cv(factors::ErrorStateGnssVerticalLeverArmFactor::Create(
                 u,
                 nominal_pos_ned,
@@ -309,12 +299,7 @@ bool MarginalizeOldestKnotTwoKnotWindow(
                 *session.lever_arm,
                 meas_pos_ned,
                 cfg.gnss_sigma_vertical_m));
-            double cauchy_scale_whitened = 0.0;
-            if (cfg.gnss_vertical_cauchy_scale_m > 0.0) {
-                cauchy_scale_whitened =
-                    cfg.gnss_vertical_cauchy_scale_m / std::max(1.0e-6, cfg.gnss_sigma_vertical_m);
-            }
-            AppendGnssHessian30(cv.get(), 1, p4h, cauchy_scale_whitened, H, g);
+            AppendGnssHessian30(cv.get(), 1, p4h, H, g);
         }
     }
 

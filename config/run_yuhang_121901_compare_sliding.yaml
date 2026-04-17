@@ -31,7 +31,6 @@ aligntime: 25.0
 kf_interval_sec: 0.1
 gnss_sigma_horizontal_m: 0.02
 gnss_sigma_vertical_m: 0.050000000000000003
-gnss_vertical_cauchy_scale_m: 0.03
 imu_sigma_accel_mps2: 0.2
 imu_sigma_gyro_rps: 0.01
 gyro_bias_rw_sigma: 1.0e-4

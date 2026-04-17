@@ -123,6 +123,43 @@ Vector3d InterpolateBias(
     return biases[i] * (1.0 - u) + biases[j] * u;
 }
 
+struct BiasCursor {
+    size_t index = 0;
+};
+
+Vector3d InterpolateBiasMonotonic(
+    double time,
+    const std::vector<double>& bias_times,
+    const AlignedVec3Array& biases,
+    const Vector3d& fallback,
+    BiasCursor& cursor) {
+    if (bias_times.empty() || biases.empty() || bias_times.size() != biases.size()) {
+        return fallback;
+    }
+    if (time <= bias_times.front()) {
+        cursor.index = 0;
+        return biases.front();
+    }
+    if (time >= bias_times.back()) {
+        cursor.index = bias_times.size() - 1;
+        return biases.back();
+    }
+    if (cursor.index >= bias_times.size() - 1) {
+        cursor.index = bias_times.size() - 2;
+    }
+    while (cursor.index + 1 < bias_times.size() && bias_times[cursor.index + 1] < time) {
+        ++cursor.index;
+    }
+    const size_t i = cursor.index;
+    const size_t j = i + 1;
+    const double dt = bias_times[j] - bias_times[i];
+    if (dt <= 1.0e-9) {
+        return biases[i];
+    }
+    const double u = (time - bias_times[i]) / dt;
+    return biases[i] * (1.0 - u) + biases[j] * u;
+}
+
 Quaterniond InterpolateQuaternion(
     double time,
     const NominalNavStates& states,
@@ -358,11 +395,17 @@ NominalNavStates PropagateNominalTrajectory(
         ++anchor_index;
     }
 
+    BiasCursor bg_cursor{};
+    BiasCursor ba_cursor{};
+    BiasCursor sg_cursor{};
+    BiasCursor sa_cursor{};
     for (size_t i = 0; i <= anchor_index; ++i) {
-        const Vector3d bg = InterpolateBias(imu[i].time, bias_times, gyro_biases, alignment.bg0);
-        const Vector3d ba = InterpolateBias(imu[i].time, bias_times, accel_biases, alignment.ba0);
-        const Vector3d sg = InterpolateBias(imu[i].time, bias_times, gyro_scales, Vector3d::Zero());
-        const Vector3d sa = InterpolateBias(imu[i].time, bias_times, accel_scales, Vector3d::Zero());
+        const Vector3d bg = InterpolateBiasMonotonic(imu[i].time, bias_times, gyro_biases, alignment.bg0, bg_cursor);
+        const Vector3d ba = InterpolateBiasMonotonic(imu[i].time, bias_times, accel_biases, alignment.ba0, ba_cursor);
+        const Vector3d sg =
+            InterpolateBiasMonotonic(imu[i].time, bias_times, gyro_scales, Vector3d::Zero(), sg_cursor);
+        const Vector3d sa =
+            InterpolateBiasMonotonic(imu[i].time, bias_times, accel_scales, Vector3d::Zero(), sa_cursor);
         nav.push_back({imu[i].time, pvacur.blh, pvacur.vel_ned, pvacur.q_nb, bg, ba, sg, sa});
     }
 
@@ -372,14 +415,22 @@ NominalNavStates PropagateNominalTrajectory(
             continue;
         }
 
-        const Vector3d bg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_biases, alignment.bg0);
-        const Vector3d ba_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_biases, alignment.ba0);
-        const Vector3d bg_cur = InterpolateBias(meas.time, bias_times, gyro_biases, alignment.bg0);
-        const Vector3d ba_cur = InterpolateBias(meas.time, bias_times, accel_biases, alignment.ba0);
-        const Vector3d sg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_scales, Vector3d::Zero());
-        const Vector3d sa_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_scales, Vector3d::Zero());
-        const Vector3d sg_cur = InterpolateBias(meas.time, bias_times, gyro_scales, Vector3d::Zero());
-        const Vector3d sa_cur = InterpolateBias(meas.time, bias_times, accel_scales, Vector3d::Zero());
+        const Vector3d bg_pre =
+            InterpolateBiasMonotonic(imu[i - 1].time, bias_times, gyro_biases, alignment.bg0, bg_cursor);
+        const Vector3d ba_pre =
+            InterpolateBiasMonotonic(imu[i - 1].time, bias_times, accel_biases, alignment.ba0, ba_cursor);
+        const Vector3d sg_pre =
+            InterpolateBiasMonotonic(imu[i - 1].time, bias_times, gyro_scales, Vector3d::Zero(), sg_cursor);
+        const Vector3d sa_pre =
+            InterpolateBiasMonotonic(imu[i - 1].time, bias_times, accel_scales, Vector3d::Zero(), sa_cursor);
+        const Vector3d bg_cur =
+            InterpolateBiasMonotonic(meas.time, bias_times, gyro_biases, alignment.bg0, bg_cursor);
+        const Vector3d ba_cur =
+            InterpolateBiasMonotonic(meas.time, bias_times, accel_biases, alignment.ba0, ba_cursor);
+        const Vector3d sg_cur =
+            InterpolateBiasMonotonic(meas.time, bias_times, gyro_scales, Vector3d::Zero(), sg_cursor);
+        const Vector3d sa_cur =
+            InterpolateBiasMonotonic(meas.time, bias_times, accel_scales, Vector3d::Zero(), sa_cursor);
         const MechImuSample imupre = BiasCompensate(imu[i - 1], bg_pre, ba_pre, sg_pre, sa_pre);
         const MechImuSample imucur = BiasCompensate(meas, bg_cur, ba_cur, sg_cur, sa_cur);
 
@@ -423,11 +474,19 @@ void ExtendNominalNavToImuIndex(
         pvacur.vel_ned = alignment.vel0_ned;
         pvacur.q_nb = alignment.q_nb;
 
+        BiasCursor bg_cursor{};
+        BiasCursor ba_cursor{};
+        BiasCursor sg_cursor{};
+        BiasCursor sa_cursor{};
         for (size_t i = 0; i <= std::min(anchor_index, target); ++i) {
-            const Vector3d bg = InterpolateBias(imu[i].time, bias_times, gyro_biases, alignment.bg0);
-            const Vector3d ba = InterpolateBias(imu[i].time, bias_times, accel_biases, alignment.ba0);
-            const Vector3d sg = InterpolateBias(imu[i].time, bias_times, gyro_scales, Vector3d::Zero());
-            const Vector3d sa = InterpolateBias(imu[i].time, bias_times, accel_scales, Vector3d::Zero());
+            const Vector3d bg =
+                InterpolateBiasMonotonic(imu[i].time, bias_times, gyro_biases, alignment.bg0, bg_cursor);
+            const Vector3d ba =
+                InterpolateBiasMonotonic(imu[i].time, bias_times, accel_biases, alignment.ba0, ba_cursor);
+            const Vector3d sg =
+                InterpolateBiasMonotonic(imu[i].time, bias_times, gyro_scales, Vector3d::Zero(), sg_cursor);
+            const Vector3d sa =
+                InterpolateBiasMonotonic(imu[i].time, bias_times, accel_scales, Vector3d::Zero(), sa_cursor);
             nav.push_back({imu[i].time, pvacur.blh, pvacur.vel_ned, pvacur.q_nb, bg, ba, sg, sa});
         }
         for (size_t i = anchor_index + 1; i <= target; ++i) {
@@ -436,14 +495,22 @@ void ExtendNominalNavToImuIndex(
                 continue;
             }
 
-            const Vector3d bg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_biases, alignment.bg0);
-            const Vector3d ba_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_biases, alignment.ba0);
-            const Vector3d bg_cur = InterpolateBias(meas.time, bias_times, gyro_biases, alignment.bg0);
-            const Vector3d ba_cur = InterpolateBias(meas.time, bias_times, accel_biases, alignment.ba0);
-            const Vector3d sg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_scales, Vector3d::Zero());
-            const Vector3d sa_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_scales, Vector3d::Zero());
-            const Vector3d sg_cur = InterpolateBias(meas.time, bias_times, gyro_scales, Vector3d::Zero());
-            const Vector3d sa_cur = InterpolateBias(meas.time, bias_times, accel_scales, Vector3d::Zero());
+            const Vector3d bg_pre =
+                InterpolateBiasMonotonic(imu[i - 1].time, bias_times, gyro_biases, alignment.bg0, bg_cursor);
+            const Vector3d ba_pre =
+                InterpolateBiasMonotonic(imu[i - 1].time, bias_times, accel_biases, alignment.ba0, ba_cursor);
+            const Vector3d sg_pre =
+                InterpolateBiasMonotonic(imu[i - 1].time, bias_times, gyro_scales, Vector3d::Zero(), sg_cursor);
+            const Vector3d sa_pre =
+                InterpolateBiasMonotonic(imu[i - 1].time, bias_times, accel_scales, Vector3d::Zero(), sa_cursor);
+            const Vector3d bg_cur =
+                InterpolateBiasMonotonic(meas.time, bias_times, gyro_biases, alignment.bg0, bg_cursor);
+            const Vector3d ba_cur =
+                InterpolateBiasMonotonic(meas.time, bias_times, accel_biases, alignment.ba0, ba_cursor);
+            const Vector3d sg_cur =
+                InterpolateBiasMonotonic(meas.time, bias_times, gyro_scales, Vector3d::Zero(), sg_cursor);
+            const Vector3d sa_cur =
+                InterpolateBiasMonotonic(meas.time, bias_times, accel_scales, Vector3d::Zero(), sa_cursor);
             const MechImuSample imupre = BiasCompensate(imu[i - 1], bg_pre, ba_pre, sg_pre, sa_pre);
             const MechImuSample imucur = BiasCompensate(meas, bg_cur, ba_cur, sg_cur, sa_cur);
 
@@ -486,20 +553,38 @@ void ExtendNominalNavToImuIndex(
     pvacur.q_nb = nav.back().q_nb;
 
     const size_t i_start = nav.size();
+    BiasCursor bg_cursor{};
+    BiasCursor ba_cursor{};
+    BiasCursor sg_cursor{};
+    BiasCursor sa_cursor{};
+    if (i_start > 0) {
+        InterpolateBiasMonotonic(imu[i_start - 1].time, bias_times, gyro_biases, alignment.bg0, bg_cursor);
+        InterpolateBiasMonotonic(imu[i_start - 1].time, bias_times, accel_biases, alignment.ba0, ba_cursor);
+        InterpolateBiasMonotonic(imu[i_start - 1].time, bias_times, gyro_scales, Vector3d::Zero(), sg_cursor);
+        InterpolateBiasMonotonic(imu[i_start - 1].time, bias_times, accel_scales, Vector3d::Zero(), sa_cursor);
+    }
     for (size_t i = i_start; i <= target; ++i) {
         const auto& meas = imu[i];
         if (meas.dt <= 0.0) {
             continue;
         }
 
-        const Vector3d bg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_biases, alignment.bg0);
-        const Vector3d ba_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_biases, alignment.ba0);
-        const Vector3d bg_cur = InterpolateBias(meas.time, bias_times, gyro_biases, alignment.bg0);
-        const Vector3d ba_cur = InterpolateBias(meas.time, bias_times, accel_biases, alignment.ba0);
-        const Vector3d sg_pre = InterpolateBias(imu[i - 1].time, bias_times, gyro_scales, Vector3d::Zero());
-        const Vector3d sa_pre = InterpolateBias(imu[i - 1].time, bias_times, accel_scales, Vector3d::Zero());
-        const Vector3d sg_cur = InterpolateBias(meas.time, bias_times, gyro_scales, Vector3d::Zero());
-        const Vector3d sa_cur = InterpolateBias(meas.time, bias_times, accel_scales, Vector3d::Zero());
+        const Vector3d bg_pre =
+            InterpolateBiasMonotonic(imu[i - 1].time, bias_times, gyro_biases, alignment.bg0, bg_cursor);
+        const Vector3d ba_pre =
+            InterpolateBiasMonotonic(imu[i - 1].time, bias_times, accel_biases, alignment.ba0, ba_cursor);
+        const Vector3d sg_pre =
+            InterpolateBiasMonotonic(imu[i - 1].time, bias_times, gyro_scales, Vector3d::Zero(), sg_cursor);
+        const Vector3d sa_pre =
+            InterpolateBiasMonotonic(imu[i - 1].time, bias_times, accel_scales, Vector3d::Zero(), sa_cursor);
+        const Vector3d bg_cur =
+            InterpolateBiasMonotonic(meas.time, bias_times, gyro_biases, alignment.bg0, bg_cursor);
+        const Vector3d ba_cur =
+            InterpolateBiasMonotonic(meas.time, bias_times, accel_biases, alignment.ba0, ba_cursor);
+        const Vector3d sg_cur =
+            InterpolateBiasMonotonic(meas.time, bias_times, gyro_scales, Vector3d::Zero(), sg_cursor);
+        const Vector3d sa_cur =
+            InterpolateBiasMonotonic(meas.time, bias_times, accel_scales, Vector3d::Zero(), sa_cursor);
         const MechImuSample imupre = BiasCompensate(imu[i - 1], bg_pre, ba_pre, sg_pre, sa_pre);
         const MechImuSample imucur = BiasCompensate(meas, bg_cur, ba_cur, sg_cur, sa_cur);
 

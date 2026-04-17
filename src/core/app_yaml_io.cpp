@@ -6,6 +6,7 @@
 
 #include "ct_fgo_sim/core/app_yaml_io.h"
 
+#include "ct_fgo_sim/core/factor_graph_backend.h"
 #include "ct_fgo_sim/core/system.h"
 #include "ct_fgo_sim/io/text_measurement_io.h"
 
@@ -69,9 +70,6 @@ bool LoadAppConfigYaml(
     if (cfg["gnss_sigma_vertical_m"]) {
         config.gnss_sigma_vertical_m = cfg["gnss_sigma_vertical_m"].as<double>();
     }
-    if (cfg["gnss_vertical_cauchy_scale_m"]) {
-        config.gnss_vertical_cauchy_scale_m = cfg["gnss_vertical_cauchy_scale_m"].as<double>();
-    }
     if (cfg["imu_sigma_accel_mps2"]) {
         config.imu_sigma_accel_mps2 = cfg["imu_sigma_accel_mps2"].as<double>();
     }
@@ -119,16 +117,6 @@ bool LoadAppConfigYaml(
         if (yaw_bias["prior_sigma_deg"]) {
             config.yaw_bias_prior_sigma_rad = yaw_bias["prior_sigma_deg"].as<double>() * kDegToRad;
         }
-        if (yaw_bias["heading_sigma_deg"]) {
-            config.yaw_bias_heading_sigma_rad = yaw_bias["heading_sigma_deg"].as<double>() * kDegToRad;
-        }
-        if (yaw_bias["heading_min_speed_mps"]) {
-            config.yaw_bias_heading_min_speed_mps = yaw_bias["heading_min_speed_mps"].as<double>();
-        }
-        if (yaw_bias["heading_cauchy_scale_deg"]) {
-            config.yaw_bias_heading_cauchy_scale_rad =
-                yaw_bias["heading_cauchy_scale_deg"].as<double>() * kDegToRad;
-        }
         if (yaw_bias["window_step_limit_deg"]) {
             config.yaw_bias_window_step_limit_rad = yaw_bias["window_step_limit_deg"].as<double>() * kDegToRad;
         }
@@ -150,6 +138,15 @@ bool LoadAppConfigYaml(
     }
     if (cfg["use_imu_factors"]) {
         config.use_imu_factors = cfg["use_imu_factors"].as<bool>();
+    }
+    if (cfg["backend"]) {
+        config.graph_backend = ParseGraphBackend(cfg["backend"].as<std::string>());
+    }
+    if (cfg["gtsam_allow_ceres_fallback"]) {
+        config.gtsam_allow_ceres_fallback = cfg["gtsam_allow_ceres_fallback"].as<bool>();
+    }
+    if (cfg["gtsam_verbose_optimizer"]) {
+        config.gtsam_verbose_optimizer = cfg["gtsam_verbose_optimizer"].as<bool>();
     }
     if (cfg["sliding_window"]) {
         const YAML::Node sw = cfg["sliding_window"];

@@ -1,5 +1,0 @@
-D:/Code/CT_FGO_SIM_sliding-window/build-gtsam/CMakeFiles/ct_fgo_sim.dir
-D:/Code/CT_FGO_SIM_sliding-window/build-gtsam/CMakeFiles/ct_fgo_sim_main.dir
-D:/Code/CT_FGO_SIM_sliding-window/build-gtsam/CMakeFiles/attitude_priority_main.dir
-D:/Code/CT_FGO_SIM_sliding-window/build-gtsam/CMakeFiles/ALL_BUILD.dir
-D:/Code/CT_FGO_SIM_sliding-window/build-gtsam/CMakeFiles/ZERO_CHECK.dir

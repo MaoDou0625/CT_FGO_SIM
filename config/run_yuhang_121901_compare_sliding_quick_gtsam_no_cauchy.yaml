@@ -1,8 +1,8 @@
-# 与 run_yuhang_121901_dataset_output.yaml 相同数据源；短时裁剪便于 batch vs sliding 快速对比
-# 全量 batch（滑窗关闭）
+# quick benchmark variant for phased gtsam backend migration
 
 gnssfile: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/rtk_ct_fgo_sim.txt"
-outputpath: "D:/Code/dataset/output/YuHangTuiChe/20260122_121901_use__transformed1cut1_compare_batch_FGO"
+outputpath: "D:/Code/dataset/output/YuHangTuiChe/20260122_121901_use__transformed1cut1_compare_sw_marg_FGO_quick_gtsam_no_cauchy"
+backend: "gtsam"
 
 imu_main:
   file: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/imu_ct_fgo_sim.txt"
@@ -26,13 +26,12 @@ body_frame:
   nhc_sigma_vy_mps: 1000000.0
   nhc_sigma_vz_mps: 0.001
 
-# 与 rtk_ct_fgo_sim.txt 时间戳同域（约 2.39e3 s）；取约 80 s 片段（须 > aligntime）
 starttime: 2387.9
-endtime: 2467.9
+endtime: 2447.9
 aligntime: 25.0
 kf_interval_sec: 0.1
 gnss_sigma_horizontal_m: 0.02
-gnss_sigma_vertical_m: 0.050000000000000003
+gnss_sigma_vertical_m: 0.05
 imu_sigma_accel_mps2: 0.2
 imu_sigma_gyro_rps: 0.01
 gyro_bias_rw_sigma: 1.0e-4
@@ -40,13 +39,13 @@ accel_bias_rw_sigma: 1.0e-3
 bias_tau_s: 3600.0
 imu_stride: 10
 outer_iterations: 1
-solver_max_iterations: 30
+solver_max_iterations: 20
 
 sliding_window:
-  enable: false
+  enable: true
   causal: false
-  knots: 40
+  knots: 30
   step_knots: 1
-  solver_max_iterations: 18
+  solver_max_iterations: 10
   marginalization: true
   log_timing: true

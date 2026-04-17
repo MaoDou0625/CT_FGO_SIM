@@ -6,7 +6,6 @@
 #include "ct_fgo_sim/factors/error_state_gnss_factor.h"
 #include "ct_fgo_sim/factors/error_state_interval_factor.h"
 #include "ct_fgo_sim/factors/error_state_nhc_factor.h"
-#include "ct_fgo_sim/factors/error_state_yaw_bias_factor.h"
 #include "ct_fgo_sim/factors/quaternion_prior_factor.h"
 #include "ct_fgo_sim/navigation/earth.h"
 #include "ct_fgo_sim/navigation/mechanization.h"
@@ -181,7 +180,6 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
 
     int gnss_horizontal_factor_count = 0;
     int gnss_vertical_factor_count = 0;
-    int gnss_heading_factor_count = 0;
     const double max_available_time =
         nominal_nav_.empty() ? -std::numeric_limits<double>::infinity() : nominal_nav_.back().time;
     constexpr double kCausalTimeTol = 1.0e-6;
@@ -244,12 +242,6 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
                 delta_theta_nodes_[start + 1].data());
             ++gnss_horizontal_factor_count;
 
-            ceres::LossFunction* vertical_loss = nullptr;
-            if (config_.gnss_vertical_cauchy_scale_m > 0.0) {
-                const double whitened_scale =
-                    config_.gnss_vertical_cauchy_scale_m / std::max(1.0e-6, config_.gnss_sigma_vertical_m);
-                vertical_loss = new ceres::CauchyLoss(whitened_scale);
-            }
             problem.AddResidualBlock(
                 factors::ErrorStateGnssVerticalLeverArmFactor::Create(
                     u,
@@ -258,67 +250,12 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
                     lever_arm_,
                     meas_pos_ned,
                     config_.gnss_sigma_vertical_m),
-                vertical_loss,
+                nullptr,
                 delta_pos_nodes_[start].data(),
                 delta_pos_nodes_[start + 1].data(),
                 delta_theta_nodes_[start].data(),
                 delta_theta_nodes_[start + 1].data());
             ++gnss_vertical_factor_count;
-        }
-    }
-    if (config_.yaw_bias_enable && config_.use_gnss_factors && yaw_bias_rad) {
-        for (size_t i = 1; i < gnss_.size(); ++i) {
-            const auto& g0 = gnss_[i - 1];
-            const auto& g1 = gnss_[i];
-            if (windowed && g1.time > max_available_time + kCausalTimeTol) {
-                continue;
-            }
-            const double dtg = g1.time - g0.time;
-            if (dtg <= 1.0e-3) {
-                continue;
-            }
-            const Vector3d p0_ned = Earth::GlobalToLocal(origin_blh_, g0.blh);
-            const Vector3d p1_ned = Earth::GlobalToLocal(origin_blh_, g1.blh);
-            const Vector3d vel_ned = (p1_ned - p0_ned) / dtg;
-            if (vel_ned.head<2>().norm() < config_.yaw_bias_heading_min_speed_mps) {
-                continue;
-            }
-            const double heading_meas = std::atan2(vel_ned.y(), vel_ned.x());
-            const double t_heading = g1.time;
-            const int start = FindNodeIntervalStart(control_points_, t_heading);
-            if (start < 0 || start + 1 >= static_cast<int>(control_points_.size())) {
-                continue;
-            }
-            if (windowed && !interval_in_window(start)) {
-                continue;
-            }
-            const auto nominal_state = EvaluateNominalState(nominal_nav_, t_heading);
-            if (!nominal_state) {
-                continue;
-            }
-            const double dtk = control_points_[start + 1].Timestamp() - control_points_[start].Timestamp();
-            if (dtk <= 1.0e-9) {
-                continue;
-            }
-            const double u = std::clamp((t_heading - control_points_[start].Timestamp()) / dtk, 0.0, 1.0);
-            ceres::LossFunction* heading_loss = nullptr;
-            if (config_.yaw_bias_heading_cauchy_scale_rad > 0.0) {
-                const double whitened_scale =
-                    config_.yaw_bias_heading_cauchy_scale_rad /
-                    std::max(1.0e-6, config_.yaw_bias_heading_sigma_rad);
-                heading_loss = new ceres::CauchyLoss(whitened_scale);
-            }
-            problem.AddResidualBlock(
-                factors::ErrorStateYawBiasFactor::Create(
-                    u,
-                    nominal_state->q_nb,
-                    heading_meas,
-                    config_.yaw_bias_heading_sigma_rad),
-                heading_loss,
-                delta_theta_nodes_[start].data(),
-                delta_theta_nodes_[start + 1].data(),
-                yaw_bias_rad);
-            ++gnss_heading_factor_count;
         }
     }
 
@@ -484,11 +421,8 @@ bool BuildAndSolveFactorGraph(FactorGraphSession& session) {
         LOG(INFO) << "GNSS factors (horizontal / vertical): "
                   << gnss_horizontal_factor_count << " / " << gnss_vertical_factor_count;
         LOG(INFO) << "NHC factors: " << nhc_factor_count;
-        if (config_.yaw_bias_enable) {
-            LOG(INFO) << "GNSS heading yaw-bias factors: " << gnss_heading_factor_count;
-            if (yaw_bias_rad) {
-                LOG(INFO) << "Current yaw_bias_rad: " << *yaw_bias_rad;
-            }
+        if (config_.yaw_bias_enable && yaw_bias_rad) {
+            LOG(INFO) << "Current yaw_bias_rad: " << *yaw_bias_rad;
         }
         LOG(INFO) << "Interval propagation factors: " << process_factor_count;
         if (windowed) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ct_fgo_sim/core/factor_graph_backend.h"
 #include "ct_fgo_sim/core/factor_graph_session.h"
 #include "ct_fgo_sim/core/marginalization_frontier.h"
 #include "ct_fgo_sim/navigation/interval_propagation.h"
@@ -51,7 +52,6 @@ struct AppConfig {
     double align_time_s = 30.0;
     double gnss_sigma_horizontal_m = 0.03;
     double gnss_sigma_vertical_m = 0.20;
-    double gnss_vertical_cauchy_scale_m = 0.12;
     double imu_sigma_accel_mps2 = 0.2;
     double imu_sigma_gyro_rps = 0.01;
     double gyro_bias_rw_sigma = 1.0e-4;
@@ -66,9 +66,6 @@ struct AppConfig {
     double initial_yaw_feedback_max_abs_rad = 1.5707963267948966;
     bool yaw_bias_enable = false;
     double yaw_bias_prior_sigma_rad = 0.17453292519943295;
-    double yaw_bias_heading_sigma_rad = 0.08726646259971647;
-    double yaw_bias_heading_min_speed_mps = 1.0;
-    double yaw_bias_heading_cauchy_scale_rad = 0.0;
     double yaw_bias_window_step_limit_rad = 0.03490658503988659;
     double yaw_bias_max_abs_rad = 0.7853981633974483;
     int imu_stride = 10;
@@ -76,6 +73,13 @@ struct AppConfig {
     int solver_max_iterations = 20;
     bool use_gnss_factors = true;
     bool use_imu_factors = true;
+    /// Factor graph backend selector: ceres (default) or gtsam.
+    GraphBackend graph_backend = GraphBackend::Ceres;
+    /// If true, allow explicit fallback to Ceres when requested GTSAM path
+    /// hits currently unsupported factor/config combinations.
+    bool gtsam_allow_ceres_fallback = false;
+    /// If true, GTSAM LM prints per-iteration SUMMARY (very noisy in sliding mode).
+    bool gtsam_verbose_optimizer = false;
     /// Fixed-lag sliding window over spline knots (disabled = single full-batch solve).
     bool sliding_window_enabled = false;
     /// If true with sliding_window_enabled, run a single causal pass (grow nominal/knots forward in time)
@@ -158,7 +162,7 @@ private:
     bool SaveOutputs() const;
     bool ApplyInitialYawFeedbackFromGnss();
     bool InjectCurrentErrorStateIntoNominalTrajectory();
-    bool RepropagateNominalToLatestImuAfterOptimization(int reprop_knot_lo);
+    bool RepropagateNominalToLatestImuAfterOptimization(int reprop_knot_lo, int reprop_knot_hi);
     std::optional<Vector3d> EvaluateNominalGyroCenterAtTime(double time) const;
     std::optional<Vector3d> EvaluateNominalAccelAtTime(double time) const;
     std::optional<Vector3d> EvaluateNodeValueAtTime(

@@ -1,6 +1,7 @@
 #include "ct_fgo_sim/core/system.h"
 
 #include "ct_fgo_sim/core/app_yaml_io.h"
+#include "ct_fgo_sim/core/factor_graph_backend.h"
 #include "ct_fgo_sim/core/spline_helpers.h"
 
 #include <glog/logging.h>
@@ -385,7 +386,8 @@ bool System::Run() {
             return false;
         }
         if (!config_.sliding_window_enabled) {
-            if (!RepropagateNominalToLatestImuAfterOptimization(0)) {
+            if (!RepropagateNominalToLatestImuAfterOptimization(
+                    0, static_cast<int>(control_points_.size()) - 1)) {
                 LOG(ERROR) << "Failed to repropagate nominal trajectory after optimization";
                 return false;
             }
@@ -413,7 +415,6 @@ void System::Describe() const {
     LOG(INFO) << "Spline dt: " << config_.spline_dt_s;
     LOG(INFO) << "Time window: [" << config_.start_time << ", " << config_.end_time << "]";
     LOG(INFO) << "GNSS sigma(h/v): " << config_.gnss_sigma_horizontal_m << ", " << config_.gnss_sigma_vertical_m;
-    LOG(INFO) << "GNSS vertical Cauchy scale (m): " << config_.gnss_vertical_cauchy_scale_m;
     LOG(INFO) << "IMU sigma(a/g): " << config_.imu_sigma_accel_mps2 << ", " << config_.imu_sigma_gyro_rps;
     LOG(INFO) << "IMU stride: " << config_.imu_stride;
     LOG(INFO) << "Outer iterations: " << config_.outer_iterations;
@@ -421,12 +422,13 @@ void System::Describe() const {
     LOG(INFO) << "Enable yaw bias optimization: " << (config_.yaw_bias_enable ? "true" : "false");
     if (config_.yaw_bias_enable) {
         LOG(INFO) << "  yaw_bias prior_sigma_deg=" << (config_.yaw_bias_prior_sigma_rad * 180.0 / M_PI)
-                  << " heading_sigma_deg=" << (config_.yaw_bias_heading_sigma_rad * 180.0 / M_PI)
-                  << " heading_min_speed_mps=" << config_.yaw_bias_heading_min_speed_mps
                   << " step_limit_deg=" << (config_.yaw_bias_window_step_limit_rad * 180.0 / M_PI);
     }
     LOG(INFO) << "Use GNSS factors: " << (config_.use_gnss_factors ? "true" : "false");
     LOG(INFO) << "Use IMU factors: " << (config_.use_imu_factors ? "true" : "false");
+    LOG(INFO) << "Graph backend: requested=" << GraphBackendName(config_.graph_backend)
+              << " active_impl=" << ActiveGraphBackendImpl(config_.graph_backend)
+              << " (gtsam_available=" << (IsGtsamBackendAvailable() ? "true" : "false") << ")";
     LOG(INFO) << "Sliding window: " << (config_.sliding_window_enabled ? "true" : "false");
     if (config_.sliding_window_enabled) {
         LOG(INFO) << "  causal=" << (config_.sliding_window_causal ? "true" : "false")
@@ -590,7 +592,7 @@ FactorGraphSession System::MakeFactorGraphSession() {
 
 bool System::BuildAndSolveProblem() {
     FactorGraphSession session = MakeFactorGraphSession();
-    return BuildAndSolveFactorGraph(session);
+    return BuildAndSolveFactorGraphWithBackend(session, config_.graph_backend);
 }
 
 bool System::BuildAndSolveProblemSliding() {
@@ -637,7 +639,7 @@ bool System::RunSlidingWindowPass(
         config_.sliding_window_adaptive_solver_iterations ? sliding_window_current_max_iterations_ : -1;
 
     const auto t0 = std::chrono::steady_clock::now();
-    if (!BuildAndSolveFactorGraph(session)) {
+    if (!BuildAndSolveFactorGraphWithBackend(session, config_.graph_backend)) {
         return false;
     }
     const auto t1 = std::chrono::steady_clock::now();
@@ -688,7 +690,12 @@ bool System::RunSlidingWindowPass(
     }
 
     const auto tr0 = std::chrono::steady_clock::now();
-    if (!RepropagateNominalToLatestImuAfterOptimization(k_lo)) {
+    const int reprop_hi = has_future_knot
+                              ? std::min(
+                                    k_hi + std::max(1, config_.sliding_window_step_knots),
+                                    static_cast<int>(control_points_.size()) - 1)
+                              : k_hi;
+    if (!RepropagateNominalToLatestImuAfterOptimization(k_lo, reprop_hi)) {
         LOG(ERROR) << "Sliding window step repropagation failed at k_lo=" << k_lo;
         return false;
     }
@@ -1359,12 +1366,18 @@ bool System::InjectCurrentErrorStateIntoNominalTrajectory() {
     return true;
 }
 
-bool System::RepropagateNominalToLatestImuAfterOptimization(int reprop_knot_lo) {
+bool System::RepropagateNominalToLatestImuAfterOptimization(int reprop_knot_lo, int reprop_knot_hi) {
     if (imu_.empty() || nominal_nav_.empty() || control_points_.empty()) {
         return true;
     }
 
-    const double latest_imu_time = imu_.back().time;
+    const int clamped_hi = std::clamp(reprop_knot_hi, 0, static_cast<int>(control_points_.size()) - 1);
+    const double reprop_hi_time = control_points_[static_cast<size_t>(clamped_hi)].Timestamp();
+    const auto target_imu_it = std::upper_bound(
+        imu_.begin(), imu_.end(), reprop_hi_time, [](double t, const ImuMeasurement& m) { return t < m.time; });
+    const size_t target_imu_index =
+        target_imu_it == imu_.begin() ? 0 : static_cast<size_t>(std::distance(imu_.begin(), target_imu_it) - 1);
+    const double latest_imu_time = imu_[target_imu_index].time;
     const double nominal_tail_before = nominal_nav_.back().time;
     NominalNavStates nominal_backup = nominal_nav_;
     IntervalPropagationCache cache_backup = interval_cache_;
@@ -1379,28 +1392,21 @@ bool System::RepropagateNominalToLatestImuAfterOptimization(int reprop_knot_lo) 
     full_ba_nodes.reserve(control_points_.size());
     full_sg_nodes.reserve(control_points_.size());
     full_sa_nodes.reserve(control_points_.size());
-    for (const auto& control_point : control_points_) {
+    for (size_t k = 0; k < control_points_.size(); ++k) {
+        const auto& control_point = control_points_[k];
         const double t_k = control_point.Timestamp();
         bias_times.push_back(t_k);
-        const auto composed_k = EvaluateComposedState(t_k);
-        if (composed_k) {
-            full_bg_nodes.push_back(composed_k->full_bg);
-            full_ba_nodes.push_back(composed_k->full_ba);
-            full_sg_nodes.push_back(composed_k->full_sg);
-            full_sa_nodes.push_back(composed_k->full_sa);
+        const auto nominal_k = EvaluateNominalState(nominal_nav_, t_k);
+        if (nominal_k) {
+            full_bg_nodes.push_back(nominal_k->bg + delta_bg_nodes_[k]);
+            full_ba_nodes.push_back(nominal_k->ba + delta_ba_nodes_[k]);
+            full_sg_nodes.push_back(nominal_k->sg + delta_sg_nodes_[k]);
+            full_sa_nodes.push_back(nominal_k->sa + delta_sa_nodes_[k]);
         } else {
-            const auto nominal_k = EvaluateNominalState(nominal_nav_, t_k);
-            if (nominal_k) {
-                full_bg_nodes.push_back(nominal_k->bg);
-                full_ba_nodes.push_back(nominal_k->ba);
-                full_sg_nodes.push_back(nominal_k->sg);
-                full_sa_nodes.push_back(nominal_k->sa);
-            } else {
-                full_bg_nodes.push_back(initial_alignment_.bg0);
-                full_ba_nodes.push_back(initial_alignment_.ba0);
-                full_sg_nodes.push_back(config_.init_sg);
-                full_sa_nodes.push_back(config_.init_sa);
-            }
+            full_bg_nodes.push_back(initial_alignment_.bg0 + delta_bg_nodes_[k]);
+            full_ba_nodes.push_back(initial_alignment_.ba0 + delta_ba_nodes_[k]);
+            full_sg_nodes.push_back(config_.init_sg + delta_sg_nodes_[k]);
+            full_sa_nodes.push_back(config_.init_sa + delta_sa_nodes_[k]);
         }
     }
 
@@ -1445,7 +1451,7 @@ bool System::RepropagateNominalToLatestImuAfterOptimization(int reprop_knot_lo) 
             full_ba_nodes,
             full_sg_nodes,
             full_sa_nodes,
-            imu_.size() - 1);
+            target_imu_index);
 
         while (!interval_cache_.imu_intervals.empty() &&
                interval_cache_.imu_intervals.back().imu_index > anchor_imu_index) {
@@ -1683,10 +1689,13 @@ bool System::SaveOutputs() const {
     std::ofstream summary_ofs(summary_path);
     summary_ofs << std::setprecision(17);
     std::vector<std::pair<double, double>> propagation_yaw_value_weight;
+    std::vector<std::pair<double, double>> course_vs_rtk_yaw_value_weight;
+    double course_vs_rtk_yaw_sum_sq = 0.0;
     const double initial_yaw_ref_rad = YawFromQuaternionNed(initial_q_nb_);
     const double propagation_heading_min_speed_mps = std::max(0.1, config_.initial_yaw_feedback_min_speed_mps);
     if (gnss_.size() >= 2) {
         propagation_yaw_value_weight.reserve(gnss_.size() - 1);
+        course_vs_rtk_yaw_value_weight.reserve(gnss_.size() - 1);
         for (size_t i = 1; i < gnss_.size(); ++i) {
             const auto& prev = gnss_[i - 1];
             const auto& curr = gnss_[i];
@@ -1710,18 +1719,41 @@ bool System::SaveOutputs() const {
             const double yaw_now = YawFromQuaternionNed(q_nb);
             const double yaw_error = WrapAngleRad(yaw_now - initial_yaw_ref_rad);
             propagation_yaw_value_weight.emplace_back(yaw_error, std::clamp(speed, 0.5, 5.0));
+
+            // RTK course from GNSS position differences (same convention as ApplyInitialYawFeedbackFromGnss).
+            const double rtk_course_yaw = std::atan2(vel_ned.y(), vel_ned.x());
+            const double course_err = WrapAngleRad(yaw_now - rtk_course_yaw);
+            course_vs_rtk_yaw_value_weight.emplace_back(course_err, std::clamp(speed, 0.5, 5.0));
+            course_vs_rtk_yaw_sum_sq += course_err * course_err;
         }
     }
     const double propagation_heading_error_rad_est = WeightedMedian(propagation_yaw_value_weight);
     const size_t propagation_heading_error_sample_count = propagation_yaw_value_weight.size();
+    const size_t course_vs_rtk_yaw_sample_count = course_vs_rtk_yaw_value_weight.size();
+    const double course_vs_rtk_yaw_rms_rad =
+        course_vs_rtk_yaw_sample_count > 0
+            ? std::sqrt(course_vs_rtk_yaw_sum_sq / static_cast<double>(course_vs_rtk_yaw_sample_count))
+            : 0.0;
+    const double course_vs_rtk_yaw_weighted_median_rad_est = WeightedMedian(course_vs_rtk_yaw_value_weight);
     summary_ofs << "gnss_file: " << config_.gnss_file << '\n';
     summary_ofs << "imu_file: " << config_.imu_main.file << '\n';
     summary_ofs << "use_gnss_factors: " << config_.use_gnss_factors << '\n';
     summary_ofs << "use_imu_factors: " << config_.use_imu_factors << '\n';
+    summary_ofs << "graph_backend: " << GraphBackendName(config_.graph_backend) << '\n';
+    summary_ofs << "graph_backend_requested: " << GraphBackendName(config_.graph_backend) << '\n';
+    summary_ofs << "graph_backend_impl: " << LastBackendImpl() << '\n';
+    summary_ofs << "graph_backend_fallback_reason: " << LastBackendFallbackReason() << '\n';
+    summary_ofs << "gtsam_allow_ceres_fallback: " << (config_.gtsam_allow_ceres_fallback ? 1 : 0) << '\n';
+    summary_ofs << "gtsam_backend_available: " << (IsGtsamBackendAvailable() ? 1 : 0) << '\n';
     summary_ofs << "output_query_dt_s: " << config_.output_query_dt_s << '\n';
     summary_ofs << "gnss_count: " << gnss_.size() << '\n';
     summary_ofs << "imu_count: " << imu_.size() << '\n';
     summary_ofs << "control_point_count: " << control_points_.size() << '\n';
+    summary_ofs << "config_start_time_s: " << config_.start_time << '\n';
+    summary_ofs << "config_end_time_s: " << config_.end_time << '\n';
+    summary_ofs << "last_gnss_time_s: " << (gnss_.empty() ? 0.0 : gnss_.back().time) << '\n';
+    summary_ofs << "last_control_point_time_s: "
+                << (control_points_.empty() ? 0.0 : control_points_.back().Timestamp()) << '\n';
     summary_ofs << "outer_iterations: " << config_.outer_iterations << '\n';
     summary_ofs << "enable_initial_yaw_feedback: " << config_.enable_initial_yaw_feedback << '\n';
     summary_ofs << "initial_yaw_feedback_applied: " << initial_yaw_feedback_applied_ << '\n';
@@ -1730,6 +1762,15 @@ bool System::SaveOutputs() const {
     summary_ofs << "propagation_heading_error_deg_est: " << (propagation_heading_error_rad_est * 180.0 / M_PI) << '\n';
     summary_ofs << "propagation_heading_error_sample_count: " << propagation_heading_error_sample_count << '\n';
     summary_ofs << "propagation_heading_error_min_speed_mps: " << propagation_heading_min_speed_mps << '\n';
+    summary_ofs << "course_vs_rtk_yaw_rms_rad: " << course_vs_rtk_yaw_rms_rad << '\n';
+    summary_ofs << "course_vs_rtk_yaw_rms_deg: " << (course_vs_rtk_yaw_rms_rad * 180.0 / M_PI) << '\n';
+    summary_ofs << "course_vs_rtk_yaw_weighted_median_rad_est: " << course_vs_rtk_yaw_weighted_median_rad_est
+                << '\n';
+    summary_ofs << "course_vs_rtk_yaw_weighted_median_deg_est: "
+                << (course_vs_rtk_yaw_weighted_median_rad_est * 180.0 / M_PI) << '\n';
+    summary_ofs << "course_vs_rtk_yaw_sample_count: " << course_vs_rtk_yaw_sample_count << '\n';
+    summary_ofs << "course_vs_rtk_yaw_min_speed_mps: " << propagation_heading_min_speed_mps << '\n';
+    summary_ofs << "gtsam_verbose_optimizer: " << (config_.gtsam_verbose_optimizer ? 1 : 0) << '\n';
     summary_ofs << "yaw_bias_enable: " << config_.yaw_bias_enable << '\n';
     summary_ofs << "yaw_bias_feedback_total_rad: " << yaw_bias_feedback_total_rad_ << '\n';
     summary_ofs << "yaw_bias_current_rad: " << yaw_bias_rad_ << '\n';
