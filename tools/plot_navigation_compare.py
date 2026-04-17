@@ -44,7 +44,10 @@ except ImportError:
 
 
 def parse_rtk_outage_yaml(yaml_path: Path) -> tuple[list[tuple[float, float]], float]:
-    """Read `rtk_outage.ranges` and `recovery_horizon_s` without PyYAML."""
+    """Read `rtk_outage.ranges` and `recovery_horizon_s` without PyYAML.
+
+    Empty `ranges` (e.g. baseline configs) returns ([], recovery); no bands are drawn.
+    """
     text = yaml_path.read_text(encoding="utf-8", errors="replace")
     in_block = False
     ranges: list[tuple[float, float]] = []
@@ -66,8 +69,6 @@ def parse_rtk_outage_yaml(yaml_path: Path) -> tuple[list[tuple[float, float]], f
         m2 = re.match(r"^\s*recovery_horizon_s:\s*([0-9.eE+-]+)", line)
         if m2:
             recovery = float(m2.group(1))
-    if not ranges:
-        raise ValueError(f"No rtk_outage ranges found in {yaml_path}")
     return ranges, recovery
 
 

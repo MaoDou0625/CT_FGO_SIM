@@ -13,6 +13,7 @@
 #include <exception>
 #include <filesystem>
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -712,10 +713,11 @@ bool System::RunSlidingWindowPass(
                                     k_hi + std::max(1, config_.sliding_window_step_knots),
                                     static_cast<int>(control_points_.size()) - 1)
                               : k_hi;
+    // Skip expensive full nominal reprop only when GTSAM actually solved this window. If
+    // gtsam_allow_ceres_fallback led to Ceres, keep Ceres-era reprop for cache consistency.
     const bool skip_window_reprop_for_gtsam =
-        (config_.graph_backend == GraphBackend::Gtsam) &&
-        config_.sliding_window_enabled &&
-        config_.sliding_window_causal;
+        (config_.graph_backend == GraphBackend::Gtsam) && config_.sliding_window_enabled &&
+        config_.sliding_window_causal && (std::strcmp(LastBackendImpl(), "gtsam_batch") == 0);
     if (!skip_window_reprop_for_gtsam) {
         if (!RepropagateNominalToLatestImuAfterOptimization(k_lo, reprop_hi)) {
             LOG(ERROR) << "Sliding window step repropagation failed at k_lo=" << k_lo;
@@ -1458,7 +1460,19 @@ std::optional<std::pair<int, int>> System::BuildReplayWindowKnotsForOutage(const
             k_hi = k;
         }
     }
-    if (k_lo < 0 || k_hi <= k_lo) {
+    if (k_lo < 0 || k_hi < 0) {
+        return std::nullopt;
+    }
+    // GNSS at time t uses knots [start, start+1] with start = FindNodeIntervalStart(..., t).
+    // Include any knot up through replay_end so recovery GNSS before the next knot is not dropped.
+    const int last_k = static_cast<int>(control_points_.size()) - 1;
+    const int start_at_replay_end = FindNodeIntervalStart(control_points_, replay_end);
+    if (start_at_replay_end < 0) {
+        return std::nullopt;
+    }
+    const int need_hi = std::min(last_k, start_at_replay_end + 1);
+    k_hi = std::max(k_hi, need_hi);
+    if (k_hi <= k_lo) {
         return std::nullopt;
     }
     return std::make_pair(k_lo, k_hi);
