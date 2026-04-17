@@ -16,7 +16,7 @@ if (WIN32 AND NOT DEFINED VCPKG_TARGET_TRIPLET)
     set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "vcpkg target triplet")
 endif ()
 
-project(CT_FGO_SIM LANGUAGES CXX)
+project(CT_FGO_SIM VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,17 +31,16 @@ endif ()
 find_package(Eigen3 REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(Ceres REQUIRED)
+find_package(GTSAM REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(glog REQUIRED)
-option(CT_FGO_SIM_ENABLE_GTSAM "Enable GTSAM backend shim for phased migration" OFF)
-if (CT_FGO_SIM_ENABLE_GTSAM)
-    find_package(GTSAM REQUIRED)
-endif ()
+
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ct_fgo_sim_version.h"
+"#pragma once\ninline constexpr const char* kCtFgoSimProjectVersion = \"${PROJECT_VERSION}\";\n")
 
 add_library(ct_fgo_sim
     src/core/app_yaml_io.cpp
     src/core/factor_graph_backend.cpp
-    src/core/factor_graph_session.cpp
     src/core/marginalization.cpp
     src/core/spline_helpers.cpp
     src/core/system.cpp
@@ -52,6 +51,8 @@ add_library(ct_fgo_sim
 target_include_directories(ct_fgo_sim
     PUBLIC
         ${PROJECT_SOURCE_DIR}/include
+    PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 target_link_libraries(ct_fgo_sim
@@ -61,11 +62,9 @@ target_link_libraries(ct_fgo_sim
         yaml-cpp::yaml-cpp
         glog::glog
         Eigen3::Eigen
+        gtsam
 )
-if (CT_FGO_SIM_ENABLE_GTSAM)
-    target_compile_definitions(ct_fgo_sim PUBLIC CT_FGO_SIM_HAS_GTSAM=1)
-    target_link_libraries(ct_fgo_sim PUBLIC gtsam)
-endif ()
+target_compile_definitions(ct_fgo_sim PUBLIC CT_FGO_SIM_HAS_GTSAM=1)
 
 add_executable(ct_fgo_sim_main
     apps/ct_fgo_sim_main.cpp

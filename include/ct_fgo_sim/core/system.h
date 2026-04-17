@@ -83,11 +83,8 @@ struct AppConfig {
     double rtk_recovery_horizon_s = 20.0;
     bool freeze_imu_error_params_in_outage = true;
     std::string retro_opt_mode = "none";
-    /// Factor graph backend selector: ceres (default) or gtsam.
-    GraphBackend graph_backend = GraphBackend::Ceres;
-    /// If true, allow explicit fallback to Ceres when requested GTSAM path
-    /// hits currently unsupported factor/config combinations.
-    bool gtsam_allow_ceres_fallback = false;
+    /// Factor graph backend (GTSAM only; YAML `backend: ceres` is accepted with a warning).
+    GraphBackend graph_backend = GraphBackend::Gtsam;
     /// If true, GTSAM LM prints per-iteration SUMMARY (very noisy in sliding mode).
     bool gtsam_verbose_optimizer = false;
     /// Fixed-lag sliding window over spline knots (disabled = single full-batch solve).
@@ -103,9 +100,9 @@ struct AppConfig {
     bool sliding_window_marginalization = true;
     /// If true, log chrono for cache build, each window build, solve, and marginalization.
     bool sliding_window_log_timing = false;
-    /// If > 0, passed to Ceres `function_tolerance` for windowed solves only.
+    /// Reserved for future windowed solver tolerances (unused with GTSAM LM).
     double sliding_window_function_tolerance = 0.0;
-    /// If > 0, passed to Ceres `gradient_tolerance` for windowed solves only.
+    /// Reserved for future windowed solver tolerances (unused with GTSAM LM).
     double sliding_window_gradient_tolerance = 0.0;
     /// Reduce `max_num_iterations` on the next window when the previous solve used few successful steps.
     bool sliding_window_adaptive_solver_iterations = false;

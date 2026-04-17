@@ -12,7 +12,6 @@
 #include <cctype>
 #include <limits>
 
-#ifdef CT_FGO_SIM_HAS_GTSAM
 #include <gtsam/base/Matrix.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/linear/NoiseModel.h>
@@ -21,7 +20,6 @@
 #include <gtsam/nonlinear/NonlinearFactor.h>
 #include <gtsam/nonlinear/PriorFactor.h>
 #include <gtsam/nonlinear/Values.h>
-#endif
 
 namespace ct_fgo_sim {
 
@@ -52,7 +50,6 @@ constexpr int kIdxBa = 12;
 constexpr int kIdxSg = 15;
 constexpr int kIdxSa = 18;
 
-#ifdef CT_FGO_SIM_HAS_GTSAM
 using gtsam::Matrix;
 using gtsam::Matrix21;
 using gtsam::Vector;
@@ -277,6 +274,7 @@ bool BuildAndSolveFactorGraphGtsamBatch(FactorGraphSession& session) {
     if (!session.config || !session.origin_blh || !session.gnss || !session.control_points || !session.nominal_nav ||
         !session.interval_cache || !session.delta_theta_nodes || !session.delta_vel_nodes || !session.delta_pos_nodes ||
         !session.delta_bg_nodes || !session.delta_ba_nodes || !session.delta_sg_nodes || !session.delta_sa_nodes) {
+        g_last_backend_fallback_reason = "incomplete_session";
         LOG(ERROR) << "BuildAndSolveFactorGraphGtsamBatch: incomplete session";
         return false;
     }
@@ -477,7 +475,16 @@ bool BuildAndSolveFactorGraphGtsamBatch(FactorGraphSession& session) {
         params.diagonalDamping = true;
         params.lambdaInitial = 1.0e-2;
     }
-    const gtsam::Values result = gtsam::LevenbergMarquardtOptimizer(graph, initial, params).optimize();
+    gtsam::LevenbergMarquardtOptimizer optimizer(graph, initial, params);
+    const gtsam::Values result = optimizer.optimize();
+    if (windowed && session.window_solver_stats_out) {
+        session.window_solver_stats_out->initial_cost = graph.error(initial);
+        session.window_solver_stats_out->final_cost = graph.error(result);
+        session.window_solver_stats_out->num_successful_steps =
+            std::max(1, static_cast<int>(optimizer.iterations()));
+        // 0 = success for sliding-window adaptive heuristics (historically matched Ceres CONVERGENCE).
+        session.window_solver_stats_out->termination_type = 0;
+    }
     for (int k = k_lo; k <= k_hi; ++k) {
         const gtsam::Vector x = result.at<gtsam::Vector>(gtsam::Symbol('x', static_cast<uint64_t>(k)));
         if (!x.allFinite()) {
@@ -515,10 +522,8 @@ bool BuildAndSolveFactorGraphGtsamBatch(FactorGraphSession& session) {
     g_last_backend_fallback_reason = "";
     return true;
 }
-#endif
 
 bool BuildAndSolveFactorGraphGtsamDispatch(FactorGraphSession& session) {
-#ifdef CT_FGO_SIM_HAS_GTSAM
     try {
         if (BuildAndSolveFactorGraphGtsamBatch(session)) {
             g_last_backend_impl = "gtsam_batch";
@@ -531,93 +536,43 @@ bool BuildAndSolveFactorGraphGtsamDispatch(FactorGraphSession& session) {
         LOG(ERROR) << "GTSAM batch solve threw unknown exception";
         g_last_backend_fallback_reason = "gtsam_exception";
     }
-    const bool allow_fallback = session.config && session.config->gtsam_allow_ceres_fallback;
-    if (!allow_fallback) {
-        LOG(ERROR) << "GTSAM backend failed: " << g_last_backend_fallback_reason
-                   << ". Enable gtsam_allow_ceres_fallback=true for explicit fallback.";
-        g_last_backend_impl = "gtsam_failed";
-        return false;
-    }
-    LOG(WARNING) << "GTSAM backend fallback to Ceres: " << g_last_backend_fallback_reason;
-    const bool ok = BuildAndSolveFactorGraph(session);
-    g_last_backend_impl = "ceres_fallback";
-    return ok;
-#else
-    const bool allow_fallback = session.config && session.config->gtsam_allow_ceres_fallback;
-    g_last_backend_fallback_reason = "gtsam_not_built";
-    if (!allow_fallback) {
-        LOG(ERROR) << "GTSAM backend requested but this build has no GTSAM support. "
-                   << "Reconfigure with -DCT_FGO_SIM_ENABLE_GTSAM=ON or enable explicit fallback.";
-        g_last_backend_impl = "unavailable";
-        return false;
-    }
-    LOG(WARNING) << "GTSAM not built; explicit fallback enabled, solving with Ceres.";
-    const bool ok = BuildAndSolveFactorGraph(session);
-    g_last_backend_impl = "ceres_fallback";
-    return ok;
-#endif
+    LOG(ERROR) << "GTSAM backend failed: " << g_last_backend_fallback_reason;
+    g_last_backend_impl = "gtsam_failed";
+    return false;
 }
 
 }  // namespace
 
 GraphBackend ParseGraphBackend(const std::string& value) {
     const std::string lower = ToLowerAscii(value);
-    if (lower == "gtsam") {
-        return GraphBackend::Gtsam;
+    if (lower == "ceres") {
+        LOG(WARNING) << "backend 'ceres' is no longer supported; using GTSAM only.";
+    } else if (!lower.empty() && lower != "gtsam") {
+        LOG(WARNING) << "Unknown backend '" << value << "'; using GTSAM.";
     }
-    if (!lower.empty() && lower != "ceres") {
-        LOG(WARNING) << "Unknown backend '" << value << "', fallback to ceres";
-    }
-    return GraphBackend::Ceres;
+    return GraphBackend::Gtsam;
 }
 
 const char* GraphBackendName(GraphBackend backend) {
     switch (backend) {
-        case GraphBackend::Ceres:
-            return "ceres";
         case GraphBackend::Gtsam:
             return "gtsam";
-        default:
-            return "ceres";
     }
+    return "gtsam";
 }
 
 bool BuildAndSolveFactorGraphWithBackend(FactorGraphSession& session, GraphBackend backend) {
-    switch (backend) {
-        case GraphBackend::Ceres:
-            g_last_backend_impl = "ceres";
-            g_last_backend_fallback_reason = "";
-            return BuildAndSolveFactorGraph(session);
-        case GraphBackend::Gtsam:
-            return BuildAndSolveFactorGraphGtsamDispatch(session);
-        default:
-            g_last_backend_impl = "ceres";
-            g_last_backend_fallback_reason = "";
-            return BuildAndSolveFactorGraph(session);
-    }
+    (void)backend;
+    return BuildAndSolveFactorGraphGtsamDispatch(session);
 }
 
 const char* ActiveGraphBackendImpl(GraphBackend backend) {
-    switch (backend) {
-        case GraphBackend::Ceres:
-            return "ceres";
-        case GraphBackend::Gtsam:
-#ifdef CT_FGO_SIM_HAS_GTSAM
-            return "gtsam_batch";
-#else
-            return "unavailable";
-#endif
-        default:
-            return "ceres";
-    }
+    (void)backend;
+    return "gtsam_batch";
 }
 
 bool IsGtsamBackendAvailable() {
-#ifdef CT_FGO_SIM_HAS_GTSAM
     return true;
-#else
-    return false;
-#endif
 }
 
 const char* LastBackendImpl() {

@@ -2,7 +2,6 @@
 
 #include "ct_fgo_sim/types.h"
 
-#include <ceres/ceres.h>
 #include <Eigen/Core>
 
 namespace ct_fgo_sim {
@@ -31,7 +30,5 @@ bool MarginalizeOldestKnotTwoKnotWindow(
     const FactorGraphSession& session,
     const MarginalizationFrontier* prior_on_k_drop,
     MarginalizationFrontier& out_on_k_drop_plus_1);
-
-ceres::CostFunction* CreateMarginalizationPriorCost(const MarginalizationFrontier& frontier);
 
 }  // namespace ct_fgo_sim

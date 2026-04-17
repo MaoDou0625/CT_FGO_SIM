@@ -1,6 +1,6 @@
 gnssfile: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/rtk_ct_fgo_sim.txt"
 outputpath: "D:/Code/dataset/output/YuHangTuiChe/20260122_121901_use__transformed1cut1_compare_sw_no_marg_FGO_quick_ceres"
-backend: "ceres"
+backend: "gtsam"
 
 imu_main:
   file: "D:/Code/dataset/YuHangTuiChe/CT_FGO_use/20260122_121901_use/transformed1cut1/imu_ct_fgo_sim.txt"

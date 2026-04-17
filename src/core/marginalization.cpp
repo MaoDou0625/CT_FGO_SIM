@@ -120,65 +120,7 @@ bool AppendGnssHessian30(
     return true;
 }
 
-class MarginalPriorCostFunction : public ceres::SizedCostFunction<21, 3, 3, 3, 3, 3, 3, 3> {
-public:
-    MarginalPriorCostFunction(Matrix15d H, Vector15d g_lin, Vector15d x0)
-        : x0_(std::move(x0)) {
-        const double eps = 1.0e-9;
-        const Matrix15d Hsym = 0.5 * (H + H.transpose());
-        Matrix15d Hwork = Hsym;
-        Hwork.diagonal().array() += eps;
-        Eigen::LLT<Matrix15d> llt(Hwork);
-        if (llt.info() != Eigen::Success) {
-            Hwork = Hsym;
-            Hwork.diagonal().array() += 1.0e-6;
-            llt.compute(Hwork);
-            if (llt.info() != Eigen::Success) {
-                LOG(ERROR) << "MarginalPriorCostFunction: LLT failed after damping";
-                Lt_.setIdentity();
-                c_.setZero();
-                return;
-            }
-        }
-        const Matrix15d L = llt.matrixL();
-        Lt_ = L.transpose();
-        c_ = L.triangularView<Eigen::Lower>().solve(g_lin);
-    }
-
-    bool Evaluate(
-        double const* const* parameters,
-        double* residuals,
-        double** jacobians) const override {
-        const Vector15d v = StackCeres15(parameters[0], parameters[1], parameters[2], parameters[3], parameters[4], parameters[5], parameters[6]);
-        const Vector15d dx = v - x0_;
-        Eigen::Map<Vector15d> r(residuals);
-        r = Lt_ * dx + c_;
-        if (!jacobians) {
-            return true;
-        }
-        for (int k = 0; k < 7; ++k) {
-            if (jacobians[k]) {
-                Eigen::Map<Eigen::Matrix<double, 21, 3, Eigen::RowMajor>> Jk(jacobians[k]);
-                Jk = Lt_.block(0, 3 * k, 21, 3);
-            }
-        }
-        return true;
-    }
-
-private:
-    Matrix15d Lt_ = Matrix15d::Identity();
-    Vector15d c_ = Vector15d::Zero();
-    Vector15d x0_ = Vector15d::Zero();
-};
-
 }  // namespace
-
-ceres::CostFunction* CreateMarginalizationPriorCost(const MarginalizationFrontier& frontier) {
-    if (!frontier.valid) {
-        return nullptr;
-    }
-    return new MarginalPriorCostFunction(frontier.H, frontier.g, frontier.x0);
-}
 
 bool MarginalizeOldestKnotTwoKnotWindow(
     int k_drop,

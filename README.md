@@ -24,7 +24,7 @@ Road-profile / IRI experiments can still use dense trajectory output and vertica
 - `output_query_dt_s` — dense export step; `0` uses IMU rate fallback in code
 - `body_frame` / `nhc_file` — optional NHC
 
-There is **no** `use_direct_spline_state` switch; only one optimization backend remains.
+There is **no** `use_direct_spline_state` switch. **v0.2.0+** uses **GTSAM only** for navigation solves; Ceres remains linked for marginalization Jacobian evaluation (`Evaluate` on existing cost functors) only.
 
 ## Historical note
 
@@ -37,6 +37,10 @@ cmake -S D:\Code\CT_FGO_SIM_sliding-window -B D:\Code\CT_FGO_SIM_sliding-window\
 cmake --build D:\Code\CT_FGO_SIM_sliding-window\build --config Release
 ```
 
+GTSAM is **required** (`find_package(GTSAM REQUIRED)`).
+
+**GTSAM-only navigation limits (v0.2.0):** the batch solver rejects non-zero IMU lever arm, active NHC body-velocity axes, `estimate_q_body_imu` with NHC, and `use_imu_factors=false`. Those cases used to be Ceres-only; use zero lever arm and NHC axes disabled (or match the shipped outage YAMLs) until GTSAM factors cover them.
+
 ## Run
 
 ```powershell
@@ -46,7 +50,7 @@ D:\Code\CT_FGO_SIM_sliding-window\build\Release\ct_fgo_sim_main.exe D:\Code\CT_F
 ## Primary implementation files
 
 - `src/core/system.cpp` — orchestration, outputs
-- `src/core/factor_graph_session.cpp` — Ceres error-state graph
+- `src/core/factor_graph_backend.cpp` — GTSAM window/batch solve (+ marginal prior)
 - `src/navigation/interval_propagation.cpp` — knot interval Φ/Q for IMU factors
 - `include/ct_fgo_sim/factors/error_state_interval_factor.h`
 - `include/ct_fgo_sim/factors/error_state_gnss_factor.h`

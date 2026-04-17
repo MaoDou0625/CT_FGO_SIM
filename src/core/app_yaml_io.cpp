@@ -166,9 +166,6 @@ bool LoadAppConfigYaml(
     if (cfg["backend"]) {
         config.graph_backend = ParseGraphBackend(cfg["backend"].as<std::string>());
     }
-    if (cfg["gtsam_allow_ceres_fallback"]) {
-        config.gtsam_allow_ceres_fallback = cfg["gtsam_allow_ceres_fallback"].as<bool>();
-    }
     if (cfg["gtsam_verbose_optimizer"]) {
         config.gtsam_verbose_optimizer = cfg["gtsam_verbose_optimizer"].as<bool>();
     }

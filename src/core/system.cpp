@@ -4,6 +4,8 @@
 #include "ct_fgo_sim/core/factor_graph_backend.h"
 #include "ct_fgo_sim/core/spline_helpers.h"
 
+#include "ct_fgo_sim_version.h"
+
 #include <glog/logging.h>
 #include <sophus/so3.hpp>
 
@@ -18,13 +20,13 @@
 #include <iomanip>
 #include <limits>
 
-#include <ceres/types.h>
-
 namespace ct_fgo_sim {
 
 namespace {
 
 constexpr double kDegToRad = M_PI / 180.0;
+/// Ceres 2.x `TerminationType::FAILURE` is 2; reserved for sliding adaptive heuristics if a failure code is ever set.
+constexpr int kWindowSolverTerminationFailure = 2;
 
 double WrapAngleRad(double angle_rad) {
     while (angle_rad > M_PI) {
@@ -668,8 +670,9 @@ bool System::RunSlidingWindowPass(
     }
 
     if (config_.sliding_window_adaptive_solver_iterations) {
-        const auto term = static_cast<ceres::TerminationType>(win_stats.termination_type);
-        if (term != ceres::FAILURE && win_stats.num_successful_steps <= 2 && win_stats.initial_cost > 0.0 &&
+        const int term = win_stats.termination_type;
+        if (term != kWindowSolverTerminationFailure && win_stats.num_successful_steps <= 2 &&
+            win_stats.initial_cost > 0.0 &&
             win_stats.final_cost < win_stats.initial_cost) {
             sliding_window_current_max_iterations_ =
                 std::max(config_.sliding_window_adaptive_solver_min_iterations, sliding_window_current_max_iterations_ - 2);
@@ -713,11 +716,10 @@ bool System::RunSlidingWindowPass(
                                     k_hi + std::max(1, config_.sliding_window_step_knots),
                                     static_cast<int>(control_points_.size()) - 1)
                               : k_hi;
-    // Skip expensive full nominal reprop only when GTSAM actually solved this window. If
-    // gtsam_allow_ceres_fallback led to Ceres, keep Ceres-era reprop for cache consistency.
+    // Skip expensive full nominal reprop after a successful GTSAM window solve (interval cache matches).
     const bool skip_window_reprop_for_gtsam =
-        (config_.graph_backend == GraphBackend::Gtsam) && config_.sliding_window_enabled &&
-        config_.sliding_window_causal && (std::strcmp(LastBackendImpl(), "gtsam_batch") == 0);
+        config_.sliding_window_enabled && config_.sliding_window_causal &&
+        (std::strcmp(LastBackendImpl(), "gtsam_batch") == 0);
     if (!skip_window_reprop_for_gtsam) {
         if (!RepropagateNominalToLatestImuAfterOptimization(k_lo, reprop_hi)) {
             LOG(ERROR) << "Sliding window step repropagation failed at k_lo=" << k_lo;
@@ -1906,8 +1908,8 @@ bool System::SaveOutputs() const {
     summary_ofs << "graph_backend_requested: " << GraphBackendName(config_.graph_backend) << '\n';
     summary_ofs << "graph_backend_impl: " << LastBackendImpl() << '\n';
     summary_ofs << "graph_backend_fallback_reason: " << LastBackendFallbackReason() << '\n';
-    summary_ofs << "gtsam_allow_ceres_fallback: " << (config_.gtsam_allow_ceres_fallback ? 1 : 0) << '\n';
     summary_ofs << "gtsam_backend_available: " << (IsGtsamBackendAvailable() ? 1 : 0) << '\n';
+    summary_ofs << "project_version: " << kCtFgoSimProjectVersion << '\n';
     summary_ofs << "output_query_dt_s: " << config_.output_query_dt_s << '\n';
     summary_ofs << "gnss_count: " << gnss_.size() << '\n';
     summary_ofs << "imu_count: " << imu_.size() << '\n';

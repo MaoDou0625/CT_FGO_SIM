@@ -12,7 +12,7 @@ namespace ct_fgo_sim {
 struct AppConfig;
 struct MarginalizationFrontier;
 
-/// Optional statistics from the last windowed Ceres solve (filled when `window_solver_stats_out` is non-null).
+/// Optional statistics from the last windowed nonlinear solve (filled when `window_solver_stats_out` is non-null).
 struct WindowSolverStats {
     int num_successful_steps = 0;
     double initial_cost = 0.0;
@@ -20,7 +20,7 @@ struct WindowSolverStats {
     int termination_type = 0;
 };
 
-/// Pointers to `System` state used to assemble and solve the Ceres factor graph.
+/// Pointers to `System` state used to assemble and solve the factor graph (GTSAM).
 struct FactorGraphSession {
     AppConfig* config = nullptr;
     Vector3d* origin_blh = nullptr;
@@ -49,12 +49,10 @@ struct FactorGraphSession {
     bool has_yaw_bias_step_limit = false;
     double yaw_bias_center_rad = 0.0;
     double yaw_bias_step_limit_rad = 0.0;
-    /// If non-null and the graph is windowed, filled after `ceres::Solve`.
+    /// If non-null and the graph is windowed, filled after the windowed GTSAM solve.
     WindowSolverStats* window_solver_stats_out = nullptr;
-    /// Per-window Ceres `max_num_iterations` when >= 1; otherwise use `AppConfig::solver_max_iterations_window`.
+    /// Per-window max LM iterations when >= 1; otherwise use `AppConfig::solver_max_iterations_window`.
     int sliding_solver_max_iterations_override = -1;
 };
-
-bool BuildAndSolveFactorGraph(FactorGraphSession& session);
 
 }  // namespace ct_fgo_sim

@@ -7,7 +7,6 @@
 namespace ct_fgo_sim {
 
 enum class GraphBackend {
-    Ceres,
     Gtsam,
 };
 
@@ -20,7 +19,7 @@ const char* ActiveGraphBackendImpl(GraphBackend backend);
 const char* LastBackendImpl();
 const char* LastBackendFallbackReason();
 
-/// Runtime capability probe (true only when GTSAM backend is built in).
+/// Runtime capability probe (always true in GTSAM-only builds).
 bool IsGtsamBackendAvailable();
 
 }  // namespace ct_fgo_sim
